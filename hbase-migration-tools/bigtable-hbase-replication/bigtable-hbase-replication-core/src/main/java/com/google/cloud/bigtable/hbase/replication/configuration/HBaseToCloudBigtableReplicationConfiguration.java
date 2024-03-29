@@ -55,6 +55,48 @@ public class HBaseToCloudBigtableReplicationConfiguration {
   public static final int DEFAULT_THREAD_COUNT = 10;
 
   /**
+   * Determines if row mutations that exceed value of FILTER_LARGE_ROWS_THRESHOLD_IN_BYTES_KEY
+   * should be logged and dropped.
+   */
+  public static final String FILTER_LARGE_ROWS_KEY =
+      "google.bigtable.replication.filter_large_rows";
+
+  public static final Boolean DEFAULT_FILTER_LARGE_ROWS = false;
+  /**
+   * Determines the size in bytes of the row mutations that should be logged and dropped when
+   * replicating to Bigtable. Default: Approximate row size accepted for batch mutation request.
+   */
+  public static final String FILTER_LARGE_ROWS_THRESHOLD_IN_BYTES_KEY =
+      "google.bigtable.replication.large_rows_threshold_bytes";
+
+  public static final Integer DEFAULT_FILTER_LARGE_ROWS_THRESHOLD_IN_BYTES = 190 * 1024 * 1024;
+
+  /**
+   * Determines the size in bytes of the row mutations that should be logged and dropped when
+   * replicating to Bigtable based on value of FILTER_MAX_CELLS_PER_MUTATION_THRESHOLD_KEY. Default:
+   * Approximate max cells for batch mutation request.
+   */
+  public static final String FILTER_MAX_CELLS_PER_MUTATION_KEY =
+      "google.bigtable.replication.filter_max_cells_per_mutation";
+
+  public static final Boolean DEFAULT_FILTER_MAX_CELLS_PER_MUTATION = false;
+  public static final String FILTER_MAX_CELLS_PER_MUTATION_THRESHOLD_KEY =
+      "google.bigtable.replication.max_cells_per_mutation";
+  public static final Integer DEFAULT_FILTER_MAX_CELLS_PER_MUTATION_THRESHOLD = 100_000 - 1;
+
+  /**
+   * Determines if cells that exceed value of FILTER_LARGE_CELLS_THRESHOLD_IN_BYTES_KEY should be
+   * logged and dropped.
+   */
+  public static final String FILTER_LARGE_CELLS_KEY =
+      "google.bigtable.replication.filter_large_cells";
+
+  public static final Boolean DEFAULT_FILTER_LARGE_CELLS = false;
+  public static final String FILTER_LARGE_CELLS_THRESHOLD_IN_BYTES_KEY =
+      "google.bigtable.replication.large_cells_threshold_bytes";
+  public static final Integer DEFAULT_FILTER_LARGE_CELLS_THRESHOLD_IN_BYTES = 100 * 1024 * 1024;
+
+  /**
    * Determines the size of request to CBT. This parameter controls the number of concurrent RPCs to
    * Cloud Bigtable.
    *
