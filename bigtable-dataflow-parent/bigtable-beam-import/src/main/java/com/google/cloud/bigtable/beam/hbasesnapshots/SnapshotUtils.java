@@ -20,6 +20,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -80,7 +81,9 @@ public class SnapshotUtils {
   static String appendCurrentTimestamp(String directory) {
     DateTimeFormatter formatter =
         DateTimeFormatter.ofPattern("yyyyMMddHHmm").withZone(ZoneId.of("UTC"));
-    return String.join("/", removeSuffixSlashIfExists(directory), formatter.format(Instant.now()));
+    String uuid = UUID.randomUUID().toString();
+    return String.join(
+        "/", removeSuffixSlashIfExists(directory), formatter.format(Instant.now()) + "-" + uuid);
   }
 
   static String getNamedDirectory(String sourceDirectory, String subFoldername) {

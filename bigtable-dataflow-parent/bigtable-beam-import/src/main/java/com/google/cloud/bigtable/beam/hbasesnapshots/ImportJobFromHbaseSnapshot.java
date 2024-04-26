@@ -132,6 +132,54 @@ public class ImportJobFromHbaseSnapshot {
     boolean getUseDynamicSplitting();
 
     void setUseDynamicSplitting(boolean value);
+
+    @Description("Specifies the threshold for number of cells per mutation written.")
+    @Default.Integer(100_000 - 1)
+    int getMaxMutationsPerRequestThreshold();
+
+    void setMaxMutationsPerRequestThreshold(int value);
+
+    @Description(
+        "Specifies whether to filter large rows that exceed FilterLargeRowsThresholdBytes should be logged and dropped.")
+    @Default.Boolean(false)
+    boolean getFilterLargeRows();
+
+    void setFilterLargeRows(boolean value);
+
+    @Description(
+        "Specifies the size in bytes of a row that should be logged and dropped before loading to Bigtable.")
+    @Default.Long(256 * 1024 * 1024)
+    long getFilterLargeRowsThresholdBytes();
+
+    void setFilterLargeRowsThresholdBytes(long value);
+
+    @Description(
+        "Specifies whether to filter large cells that exceed FilterLargeCellsThresholdBytes should be logged and dropped.")
+    @Default.Boolean(true)
+    boolean getFilterLargeCells();
+
+    void setFilterLargeCells(boolean value);
+
+    @Description(
+        "Specifies the size in bytes of a cell that should be logged and dropped before loading to Bigtable.")
+    @Default.Integer(100 * 1024 * 1024)
+    int getFilterLargeCellsThresholdBytes();
+
+    void setFilterLargeCellsThresholdBytes(int value);
+
+    @Description(
+        "Specifies whether to filter large row keys that exceed FilterLargeRowKeysThresholdBytes should be logged and dropped.")
+    @Default.Boolean(false)
+    boolean getFilterLargeRowKeys();
+
+    void setFilterLargeRowKeys(boolean value);
+
+    @Description(
+        "Specifies the size in bytes of a row key that should be logged and dropped before loading to Bigtable.")
+    @Default.Integer(4 * 1024)
+    int getFilterLargeRowKeysThresholdBytes();
+
+    void setFilterLargeRowKeysThresholdBytes(int value);
   }
 
   public static void main(String[] args) throws Exception {
@@ -240,7 +288,17 @@ public class ImportJobFromHbaseSnapshot {
     PCollection<KV<String, Iterable<Mutation>>> hbaseRecords =
         restoredSnapshots
             .apply("List Regions", new ListRegions())
-            .apply("Read Regions", new ReadRegions(options.getUseDynamicSplitting()));
+            .apply(
+                "Read Regions",
+                new ReadRegions(
+                    options.getUseDynamicSplitting(),
+                    options.getMaxMutationsPerRequestThreshold(),
+                    options.getFilterLargeRows(),
+                    options.getFilterLargeRowsThresholdBytes(),
+                    options.getFilterLargeCells(),
+                    options.getFilterLargeCellsThresholdBytes(),
+                    options.getFilterLargeRowKeys(),
+                    options.getFilterLargeRowKeysThresholdBytes()));
 
     options.setBigtableTableId(ValueProvider.StaticValueProvider.of("NA"));
     CloudBigtableTableConfiguration bigtableConfiguration =

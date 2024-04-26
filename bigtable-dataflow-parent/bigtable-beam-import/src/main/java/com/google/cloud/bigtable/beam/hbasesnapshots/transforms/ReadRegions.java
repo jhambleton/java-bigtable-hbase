@@ -24,12 +24,12 @@ import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.client.*;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.RegionSplitter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,8 +50,37 @@ public class ReadRegions
 
   private final boolean useDynamicSplitting;
 
-  public ReadRegions(boolean useDynamicSplitting) {
+  private final int maxMutationsPerRequestThreshold;
+
+  private final boolean filterLargeRows;
+  private final long filterLargeRowThresholdBytes;
+
+  private final boolean filterLargeCells;
+  private final int filterLargeCellThresholdBytes;
+
+  private final boolean filterLargeRowKeys;
+  private final int filterLargeRowKeysThresholdBytes;
+
+  public ReadRegions(
+      boolean useDynamicSplitting,
+      int maxMutationsPerRequestThreshold,
+      boolean filterLargeRows,
+      long filterLargeRowThresholdBytes,
+      boolean filterLargeCells,
+      int filterLargeCellThresholdBytes,
+      boolean filterLargeRowKeys,
+      int filterLargeRowKeysThresholdBytes) {
     this.useDynamicSplitting = useDynamicSplitting;
+    this.maxMutationsPerRequestThreshold = maxMutationsPerRequestThreshold;
+
+    this.filterLargeRows = filterLargeRows;
+    this.filterLargeRowThresholdBytes = filterLargeRowThresholdBytes;
+
+    this.filterLargeCells = filterLargeCells;
+    this.filterLargeCellThresholdBytes = filterLargeCellThresholdBytes;
+
+    this.filterLargeRowKeys = filterLargeRowKeys;
+    this.filterLargeRowKeysThresholdBytes = filterLargeRowKeysThresholdBytes;
   }
 
   @Override
@@ -70,7 +99,17 @@ public class ReadRegions
     return regionConfig
         .apply("Read snapshot region", ParDo.of(new ReadRegionFn(this.useDynamicSplitting)))
         .setCoder(KvCoder.of(snapshotConfigSchemaCoder, hbaseResultCoder))
-        .apply("Create Mutation", ParDo.of(new CreateMutationsFn()));
+        .apply(
+            "Create Mutation",
+            ParDo.of(
+                new CreateMutationsFn(
+                    this.maxMutationsPerRequestThreshold,
+                    this.filterLargeRows,
+                    this.filterLargeRowThresholdBytes,
+                    this.filterLargeCells,
+                    this.filterLargeCellThresholdBytes,
+                    this.filterLargeRowKeys,
+                    this.filterLargeRowKeysThresholdBytes)));
   }
 
   static class ReadRegionFn extends DoFn<RegionConfig, KV<SnapshotConfig, Result>> {
@@ -88,15 +127,18 @@ public class ReadRegions
         OutputReceiver<KV<SnapshotConfig, Result>> outputReceiver,
         RestrictionTracker<ByteKeyRange, ByteKey> tracker)
         throws Exception {
+
       boolean hasSplit = false;
       try (ResultScanner scanner = newScanner(regionConfig, tracker.currentRestriction())) {
         for (Result result : scanner) {
+          //  if (flag==0 ) {
           if (tracker.tryClaim(ByteKey.copyFrom(result.getRow()))) {
             outputReceiver.output(KV.of(regionConfig.getSnapshotConfig(), result));
           } else {
             hasSplit = true;
             break;
           }
+          // }
         }
       }
       // if (!hasSplit)
@@ -196,7 +238,6 @@ public class ReadRegions
       }
     }
 
-    @VisibleForTesting
     private int getSplits(long sizeInBytes) {
       return (int) Math.ceil((double) sizeInBytes / BYTES_PER_SPLIT);
     }
@@ -216,28 +257,90 @@ public class ReadRegions
   static class CreateMutationsFn
       extends DoFn<KV<SnapshotConfig, Result>, KV<String, Iterable<Mutation>>> {
     private static final Logger LOG = LoggerFactory.getLogger(CreateMutationsFn.class);
-    private static final int MAX_MUTATIONS_PER_REQUEST = 999_999;
+    private final int maxMutationsPerRequestThreshold;
+
+    private final boolean filterLargeRows;
+
+    private final long filterLargeRowThresholdBytes;
+
+    private final boolean filterLargeCells;
+
+    private final int filterLargeCellThresholdBytes;
+
+    private final boolean filterLargeRowKeys;
+
+    private final int filterLargeRowKeysThresholdBytes;
+
+    public CreateMutationsFn(
+        int maxMutationsPerRequestThreshold,
+        boolean filterLargeRows,
+        long filterLargeRowThresholdBytes,
+        boolean filterLargeCells,
+        int filterLargeCellThresholdBytes,
+        boolean filterLargeRowKeys,
+        int filterLargeRowKeysThresholdBytes) {
+
+      this.maxMutationsPerRequestThreshold = maxMutationsPerRequestThreshold;
+
+      this.filterLargeRows = filterLargeRows;
+      this.filterLargeRowThresholdBytes = filterLargeRowThresholdBytes;
+
+      this.filterLargeCells = filterLargeCells;
+      this.filterLargeCellThresholdBytes = filterLargeCellThresholdBytes;
+
+      this.filterLargeRowKeys = filterLargeRowKeys;
+      this.filterLargeRowKeysThresholdBytes = filterLargeRowKeysThresholdBytes;
+    }
 
     @ProcessElement
     public void processElement(
         @Element KV<SnapshotConfig, Result> element,
         OutputReceiver<KV<String, Iterable<Mutation>>> outputReceiver)
         throws IOException {
-
       if (element.getValue().listCells().isEmpty()) return;
-
       String targetTable = element.getKey().getTableName();
 
       // Limit the number of mutations per Put (server will reject >= 100k mutations per Put)
       byte[] rowKey = element.getValue().getRow();
       List<Mutation> mutations = new ArrayList<>();
 
-      int cellCount = 0;
+      boolean logAndSkipIncompatibleRowMutations =
+          verifyRowMutationThresholds(rowKey, element.getValue().listCells(), mutations);
+
+      if (!logAndSkipIncompatibleRowMutations && mutations.size() > 0) {
+        outputReceiver.output(KV.of(targetTable, mutations));
+      }
+    }
+
+    private boolean verifyRowMutationThresholds(
+        byte[] rowKey, List<Cell> cells, List<Mutation> mutations) throws IOException {
+      boolean logAndSkipIncompatibleRows = false;
 
       Put put = null;
-      for (Cell cell : element.getValue().listCells()) {
+      int cellCount = 0;
+      long totalByteSize = 0L;
+
+      // create mutations
+      for (Cell cell : cells) {
+        totalByteSize += cell.heapSize();
+
+        // handle large cells
+        if (filterLargeCells && cell.getValueLength() > filterLargeCellThresholdBytes) {
+          // TODO add config name in log
+          LOG.warn(
+              "Dropping mutation, cell value length, "
+                  + cell.getValueLength()
+                  + ", exceeds filter length, "
+                  + filterLargeCellThresholdBytes
+                  + ", cell: "
+                  + cell
+                  + ", row key: "
+                  + Bytes.toStringBinary(rowKey));
+          continue;
+        }
+
         // Split the row into multiple mutations if mutations exceeds threshold limit
-        if (cellCount % MAX_MUTATIONS_PER_REQUEST == 0) {
+        if (cellCount % maxMutationsPerRequestThreshold == 0) {
           cellCount = 0;
           put = new Put(rowKey);
           mutations.add(put);
@@ -246,7 +349,31 @@ public class ReadRegions
         cellCount++;
       }
 
-      outputReceiver.output(KV.of(targetTable, mutations));
+      // TODO add config name in log
+      if (filterLargeRows && totalByteSize > filterLargeRowThresholdBytes) {
+        logAndSkipIncompatibleRows = true;
+        LOG.warn(
+            "Dropping row, row length, "
+                + totalByteSize
+                + ", exceeds filter length threshold, "
+                + filterLargeRowThresholdBytes
+                + ", row key: "
+                + Bytes.toStringBinary(rowKey));
+      }
+
+      // TODO add config name in log
+      if (filterLargeRowKeys && rowKey.length > filterLargeRowKeysThresholdBytes) {
+        logAndSkipIncompatibleRows = true;
+        LOG.warn(
+            "Dropping row, row key length, "
+                + rowKey.length
+                + ", exceeds filter length threshold, "
+                + filterLargeRowKeysThresholdBytes
+                + ", row key: "
+                + Bytes.toStringBinary(rowKey));
+      }
+
+      return logAndSkipIncompatibleRows;
     }
   }
 }
