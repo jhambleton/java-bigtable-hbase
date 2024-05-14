@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.google.cloud.bigtable.beam.hbasesnapshots;
+package com.google.cloud.bigtable.beam.hbasesnapshots.conf;
 
 import com.google.common.base.Preconditions;
 import org.apache.beam.sdk.extensions.gcp.util.gcsfs.GcsPath;
@@ -26,10 +26,8 @@ import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.mapreduce.TableInputFormat;
+import org.apache.hadoop.hbase.mapreduce.TableMapReduceUtil;
 import org.apache.hadoop.hbase.mapreduce.TableSnapshotInputFormat;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.ClientProtos;
-import org.apache.hadoop.hbase.util.Base64;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.mapreduce.InputFormat;
 import org.apache.hadoop.mapreduce.Job;
@@ -39,7 +37,7 @@ import org.apache.hadoop.mapreduce.Job;
  * hosted in Google Cloud Storage(GCS) bucket via GCS connector. It uses {@link
  * TableSnapshotInputFormat} for reading HBase snapshots.
  */
-class HBaseSnapshotInputConfigBuilder {
+public class HBaseSnapshotInputConfigBuilder {
 
   private static final Log LOG = LogFactory.getLog(HBaseSnapshotInputConfigBuilder.class);
   // Batch size used for HBase snapshot scans
@@ -110,8 +108,9 @@ class HBaseSnapshotInputConfigBuilder {
 
     // Configuring a MapReduce Job base on HBaseConfiguration
     // and return the job Configuration
-    ClientProtos.Scan proto = ProtobufUtil.toScan(new Scan().setBatch(BATCH_SIZE));
-    conf.set(TableInputFormat.SCAN, Base64.encodeBytes(proto.toByteArray()));
+    conf.set(
+        TableInputFormat.SCAN,
+        TableMapReduceUtil.convertScanToString(new Scan().setBatch(BATCH_SIZE)));
     Job job = Job.getInstance(conf); // creates internal clone of hbaseConf
     // the restore folder need to under current bucket root so to be considered
     // within the same filesystem with the hbaseSnapshotSourceDir
