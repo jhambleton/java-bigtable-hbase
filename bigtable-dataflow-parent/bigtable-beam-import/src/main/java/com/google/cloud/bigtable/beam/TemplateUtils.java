@@ -45,7 +45,6 @@ public class TemplateUtils {
             .withInstanceId(opts.getBigtableInstanceId())
             .withTableId(opts.getBigtableTableId())
             .withConfiguration(BigtableOptionsFactory.CUSTOM_USER_AGENT_KEY, customUserAgent)
-            .withConfiguration(BigtableOptionsFactory.BIGTABLE_ENABLE_BULK_MUTATION_FLOW_CONTROL, "true")
             .withConfiguration(BigtableOptionsFactory.MAX_INFLIGHT_RPCS_KEY, "100");
     if (opts.getBigtableAppProfileId() != null) {
       builder.withAppProfileId(opts.getBigtableAppProfileId());
