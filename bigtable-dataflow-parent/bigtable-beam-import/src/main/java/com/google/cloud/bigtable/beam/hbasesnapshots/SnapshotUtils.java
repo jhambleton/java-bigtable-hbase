@@ -105,7 +105,7 @@ public class SnapshotUtils {
     configurations.put("fs.gs.project.id", project);
     configurations.put("google.cloud.auth.service.account.enable", "true");
 
-    if (runner.equals(DIRECTRUNNER)) {
+    if (runner == null || runner.equals(DIRECTRUNNER)) {
       // https://github.com/GoogleCloudDataproc/hadoop-connectors/blob/master/gcs/CONFIGURATION.md#authentication
       configurations.put("fs.gs.auth.type", "APPLICATION_DEFAULT");
     }
@@ -182,6 +182,21 @@ public class SnapshotUtils {
    * @param importConfig - Job Configuration
    */
   public static void setRestorePath(ImportConfig importConfig) {
+    importConfig.setRestorepath(
+        formatRestorePath(importConfig.getRestorepath(), importConfig.getSourcepath()));
+  }
+
+  /**
+   * Creates restore path based on the input configuration
+   *
+   * @param restorePath - Restore path of the job.
+   * @param importConfig - Import config where we will set the restorePath property.
+   */
+  public static void setRestorePath(String restorePath, ImportConfig importConfig) {
+    if (restorePath != null) {
+      importConfig.setRestorepath(restorePath);
+      return;
+    }
     importConfig.setRestorepath(
         formatRestorePath(importConfig.getRestorepath(), importConfig.getSourcepath()));
   }

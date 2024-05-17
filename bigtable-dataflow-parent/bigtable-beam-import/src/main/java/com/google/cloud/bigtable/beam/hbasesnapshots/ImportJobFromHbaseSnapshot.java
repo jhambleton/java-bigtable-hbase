@@ -180,6 +180,17 @@ public class ImportJobFromHbaseSnapshot {
     int getFilterLargeRowKeysThresholdBytes();
 
     void setFilterLargeRowKeysThresholdBytes(int value);
+
+    @Description("Specifies the path to the restored Snapshot files.")
+    String getRestorePath();
+
+    void setRestorePath(String value);
+
+    @Description("Specifies whether the snapshots restored should be deleted.")
+    @Default.Boolean(false)
+    Boolean getDeleteRestoredSnapshots();
+
+    void setDeleteRestoredSnapshots(Boolean value);
   }
 
   public static void main(String[] args) throws Exception {
@@ -218,13 +229,14 @@ public class ImportJobFromHbaseSnapshot {
   }
 
   @VisibleForTesting
-  static ImportConfig buildImportConfigFromConfigFile(String configFilePath) throws Exception {
+  static ImportConfig buildImportConfigFromConfigFile(String configFilePath)
+      throws Exception {
     Gson gson = new GsonBuilder().create();
     ImportConfig importConfig =
         gson.fromJson(SnapshotUtils.readFileContents(configFilePath), ImportConfig.class);
     Preconditions.checkNotNull(importConfig.getSourcepath(), MISSING_SNAPSHOT_SOURCEPATH);
     Preconditions.checkNotNull(importConfig.getSnapshots(), MISSING_SNAPSHOT_NAMES);
-    SnapshotUtils.setRestorePath(importConfig);
+    SnapshotUtils.setRestorePath(importConfig.getRestorepath(), importConfig);
     return importConfig;
   }
 
@@ -246,7 +258,7 @@ public class ImportJobFromHbaseSnapshot {
     ImportConfig importConfig = new ImportConfig();
     importConfig.setSourcepath(options.getHbaseSnapshotSourceDir());
     importConfig.setSnapshotsFromMap(snapshots);
-    SnapshotUtils.setRestorePath(importConfig);
+    SnapshotUtils.setRestorePath(options.getRestorePath(), importConfig);
     return importConfig;
   }
 
@@ -278,9 +290,12 @@ public class ImportJobFromHbaseSnapshot {
     Pipeline pipeline = Pipeline.create(options);
 
     PCollection<SnapshotConfig> restoredSnapshots =
-        pipeline
-            .apply("Read Snapshot Configs", Create.of(snapshotConfigs))
-            .apply("Restore Snapshots", ParDo.of(new RestoreSnapshot()));
+        pipeline.apply("Read Snapshot Configs", Create.of(snapshotConfigs));
+    final boolean snapshotNeedsRestore = options.getRestorePath() == null;
+    if (snapshotNeedsRestore) {
+      restoredSnapshots =
+          restoredSnapshots.apply("Restore Snapshots", ParDo.of(new RestoreSnapshot()));
+    }
 
     // Read records from hbase region files and write to Bigtable
     //    PCollection<RegionConfig> hbaseRecords = restoredSnapshots
@@ -314,9 +329,11 @@ public class ImportJobFromHbaseSnapshot {
         "Write to BigTable", CloudBigtableIO.writeToMultipleTables(bigtableConfiguration));
 
     // Clean up all the temporary restored snapshot HLinks after reading all the data
-    restoredSnapshots
-        .apply(Wait.on(hbaseRecords))
-        .apply("Clean restored files", ParDo.of(new CleanupRestoredSnapshots()));
+    if (options.getDeleteRestoredSnapshots()) {
+      restoredSnapshots
+          .apply(Wait.on(hbaseRecords))
+          .apply("Clean restored files", ParDo.of(new CleanupRestoredSnapshots()));
+    }
 
     return pipeline;
   }
