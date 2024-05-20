@@ -2,20 +2,41 @@ package com.google.cloud.bigtable.beam.hbasesnapshots.transforms;
 
 // import com.google.cloud.bigtable.beam.hbasesnapshots.ImportSnapshots;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.api.core.InternalApi;
+import com.google.cloud.bigtable.beam.CloudBigtableIO.CloudBigtableMultiTableWriteFn;
+import com.google.cloud.bigtable.beam.CloudBigtableTableConfiguration;
 import com.google.cloud.bigtable.beam.hbasesnapshots.conf.RegionConfig;
 import com.google.cloud.bigtable.beam.hbasesnapshots.conf.SnapshotConfig;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.BoundType;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Range;
+import com.google.common.collect.RangeSet;
+import com.google.common.collect.TreeRangeSet;
+import com.google.common.hash.Hashing;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.Serializable;
+import java.nio.channels.Channels;
+import java.nio.channels.ReadableByteChannel;
+import java.nio.channels.WritableByteChannel;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
-import org.apache.beam.sdk.Pipeline;
-import org.apache.beam.sdk.coders.CannotProvideCoderException;
-import org.apache.beam.sdk.coders.Coder;
-import org.apache.beam.sdk.coders.KvCoder;
+import java.util.Map;
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+import org.apache.beam.sdk.io.FileSystems;
+import org.apache.beam.sdk.io.fs.EmptyMatchTreatment;
+import org.apache.beam.sdk.io.fs.MatchResult;
+import org.apache.beam.sdk.io.fs.MatchResult.Metadata;
+import org.apache.beam.sdk.io.fs.ResolveOptions.StandardResolveOptions;
+import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.io.range.ByteKey;
 import org.apache.beam.sdk.io.range.ByteKeyRange;
-import org.apache.beam.sdk.schemas.NoSuchSchemaException;
-import org.apache.beam.sdk.schemas.SchemaCoder;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -23,12 +44,18 @@ import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.client.*;
+import org.apache.hadoop.hbase.client.IsolationLevel;
+import org.apache.hadoop.hbase.client.Mutation;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.RegionScanner;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
@@ -47,7 +74,7 @@ import org.slf4j.LoggerFactory;
  */
 @InternalApi("For internal usage only")
 public class ReadRegions
-    extends PTransform<PCollection<RegionConfig>, PCollection<KV<String, Iterable<Mutation>>>> {
+    extends PTransform<PCollection<RegionConfig>, PCollection<Void>> {
 
   private static final long BYTES_PER_SPLIT = 512 * 1024 * 1024; // 512 MB
 
@@ -66,6 +93,8 @@ public class ReadRegions
   private final boolean filterLargeRowKeys;
   private final int filterLargeRowKeysThresholdBytes;
 
+  private final CloudBigtableTableConfiguration cloudBigtableTableConfiguration;
+
   public ReadRegions(
       boolean useDynamicSplitting,
       int maxMutationsPerRequestThreshold,
@@ -74,7 +103,9 @@ public class ReadRegions
       boolean filterLargeCells,
       int filterLargeCellThresholdBytes,
       boolean filterLargeRowKeys,
-      int filterLargeRowKeysThresholdBytes) {
+      int filterLargeRowKeysThresholdBytes,
+      CloudBigtableTableConfiguration bigtableTableConfiguration) {
+
     this.useDynamicSplitting = useDynamicSplitting;
     this.maxMutationsPerRequestThreshold = maxMutationsPerRequestThreshold;
 
@@ -86,68 +117,89 @@ public class ReadRegions
 
     this.filterLargeRowKeys = filterLargeRowKeys;
     this.filterLargeRowKeysThresholdBytes = filterLargeRowKeysThresholdBytes;
+
+    this.cloudBigtableTableConfiguration = bigtableTableConfiguration;
   }
 
   @Override
-  public PCollection<KV<String, Iterable<Mutation>>> expand(
-      PCollection<RegionConfig> regionConfig) {
-    Pipeline pipeline = regionConfig.getPipeline();
-    SchemaCoder<SnapshotConfig> snapshotConfigSchemaCoder;
-    Coder<Result> hbaseResultCoder;
-    try {
-      snapshotConfigSchemaCoder = pipeline.getSchemaRegistry().getSchemaCoder(SnapshotConfig.class);
-      hbaseResultCoder = pipeline.getCoderRegistry().getCoder(TypeDescriptor.of(Result.class));
-    } catch (CannotProvideCoderException | NoSuchSchemaException e) {
-      throw new RuntimeException(e);
-    }
+  public PCollection<Void> expand(PCollection<RegionConfig> regionConfig) {
+
+    CreateMutationsFn createMutationsFn = new CreateMutationsFn(
+        this.maxMutationsPerRequestThreshold,
+        this.filterLargeRows,
+        this.filterLargeRowThresholdBytes,
+        this.filterLargeCells,
+        this.filterLargeCellThresholdBytes,
+        this.filterLargeRowKeys,
+        this.filterLargeRowKeysThresholdBytes);
+
+    CloudBigtableMultiTableWriteFn writeFn = new CloudBigtableMultiTableWriteFn(this.cloudBigtableTableConfiguration);
 
     return regionConfig
-        .apply("Read snapshot region", ParDo.of(new ReadRegionFn(this.useDynamicSplitting)))
-        .setCoder(KvCoder.of(snapshotConfigSchemaCoder, hbaseResultCoder))
-        .apply(
-            "Create Mutation",
-            ParDo.of(
-                new CreateMutationsFn(
-                    this.maxMutationsPerRequestThreshold,
-                    this.filterLargeRows,
-                    this.filterLargeRowThresholdBytes,
-                    this.filterLargeCells,
-                    this.filterLargeCellThresholdBytes,
-                    this.filterLargeRowKeys,
-                    this.filterLargeRowKeysThresholdBytes)));
+        .apply("Read snapshot region and Write", ParDo.of(
+            new ReadRegionFn(this.useDynamicSplitting, createMutationsFn, writeFn)));
   }
 
-  static class ReadRegionFn extends DoFn<RegionConfig, KV<SnapshotConfig, Result>> {
+  static class ReadRegionFn extends DoFn<RegionConfig, Void> {
     private static final Logger LOG = LoggerFactory.getLogger(ReadRegionFn.class);
 
     private final boolean useDynamicSplitting;
+    private final CreateMutationsFn createMutationsFn;
+    private final CloudBigtableMultiTableWriteFn writeFn;
 
-    public ReadRegionFn(boolean useDynamicSplitting) {
+    public ReadRegionFn(boolean useDynamicSplitting,
+        CreateMutationsFn createMutationsFn,
+        CloudBigtableMultiTableWriteFn writeFn) {
       this.useDynamicSplitting = useDynamicSplitting;
+      this.createMutationsFn = createMutationsFn;
+      this.writeFn = writeFn;
+    }
+
+    @StartBundle
+    public void startBundle() throws Exception {
+      writeFn.startBundle();
+    }
+
+    @FinishBundle
+    public void finishBundle(FinishBundleContext context) throws Exception {
+      // ensure all buffered writes complete
+      writeFn.finishBundle(null);
     }
 
     @ProcessElement
     public void processElement(
         @Element RegionConfig regionConfig,
-        OutputReceiver<KV<SnapshotConfig, Result>> outputReceiver,
+        OutputReceiver<Void> outputReceiver,
         RestrictionTracker<ByteKeyRange, ByteKey> tracker)
         throws Exception {
 
-      boolean hasSplit = false;
-      try (HBaseRegionScanner scanner = newScanner(regionConfig, tracker.currentRestriction())) {
+      processRange(regionConfig, outputReceiver, tracker, tracker.currentRestriction());
+      tracker.tryClaim(ByteKey.EMPTY);
+    }
+
+    private boolean processRange(RegionConfig regionConfig, OutputReceiver<Void> outputReceiver,
+        RestrictionTracker<ByteKeyRange, ByteKey> tracker, ByteKeyRange range) throws Exception {
+      boolean entireRangeProcessed = true;
+      ByteKeyRange bkRange = range;
+      try (HBaseRegionScanner scanner = newScanner(regionConfig,
+          bkRange.getStartKey().getBytes(),
+          bkRange.getEndKey().getBytes())) {
         for (Result result = scanner.next(); result != null; result = scanner.next()) {
-          //  if (flag==0 ) {
           if (tracker.tryClaim(ByteKey.copyFrom(result.getRow()))) {
-            outputReceiver.output(KV.of(regionConfig.getSnapshotConfig(), result));
+            KV<String, Iterable<Mutation>> mutation =
+                createMutationsFn.processElement(KV.of(regionConfig.getSnapshotConfig(), result));
+            if (mutation != null) {
+              writeFn.processElement(mutation, null);
+            }
+            outputReceiver.output(null);
           } else {
-            hasSplit = true;
+            entireRangeProcessed = false;
             break;
           }
-          // }
         }
       }
-      // if (!hasSplit)
-      tracker.tryClaim(ByteKey.EMPTY);
+
+      return entireRangeProcessed;
     }
 
     /**
@@ -158,13 +210,13 @@ public class ReadRegions
      * @return
      * @throws Exception
      */
-    private HBaseRegionScanner newScanner(RegionConfig regionConfig, ByteKeyRange byteKeyRange)
+    private HBaseRegionScanner newScanner(RegionConfig regionConfig, byte[] startKey, byte[] endKey)
         throws Exception {
       Scan scan =
           new Scan()
               // Limit scan to split range
-              .withStartRow(byteKeyRange.getStartKey().getBytes())
-              .withStopRow(byteKeyRange.getEndKey().getBytes())
+              .withStartRow(startKey)
+              .withStopRow(endKey)
               .setIsolationLevel(IsolationLevel.READ_UNCOMMITTED)
               .setCacheBlocks(false);
 
@@ -258,8 +310,7 @@ public class ReadRegions
    * A {@link DoFn} class for converting Hbase {@link org.apache.hadoop.hbase.client.Result} to list
    * of Hbase {@link org.apache.hadoop.hbase.client.Mutation}s
    */
-  static class CreateMutationsFn
-      extends DoFn<KV<SnapshotConfig, Result>, KV<String, Iterable<Mutation>>> {
+  static class CreateMutationsFn implements Serializable {
     private static final Logger LOG = LoggerFactory.getLogger(CreateMutationsFn.class);
     private final int maxMutationsPerRequestThreshold;
 
@@ -296,12 +347,9 @@ public class ReadRegions
       this.filterLargeRowKeysThresholdBytes = filterLargeRowKeysThresholdBytes;
     }
 
-    @ProcessElement
-    public void processElement(
-        @Element KV<SnapshotConfig, Result> element,
-        OutputReceiver<KV<String, Iterable<Mutation>>> outputReceiver)
+    public KV<String, Iterable<Mutation>> processElement(KV<SnapshotConfig, Result> element)
         throws IOException {
-      if (element.getValue().listCells().isEmpty()) return;
+      if (element.getValue().listCells().isEmpty()) return null;
       String targetTable = element.getKey().getTableName();
 
       // Limit the number of mutations per Put (server will reject >= 100k mutations per Put)
@@ -312,7 +360,9 @@ public class ReadRegions
           verifyRowMutationThresholds(rowKey, element.getValue().listCells(), mutations);
 
       if (!logAndSkipIncompatibleRowMutations && mutations.size() > 0) {
-        outputReceiver.output(KV.of(targetTable, mutations));
+         return KV.of(targetTable, mutations);
+      } else {
+        return null;
       }
     }
 

@@ -285,20 +285,6 @@ public class ImportJobFromHbaseSnapshot {
     // Read records from hbase region files and write to Bigtable
     //    PCollection<RegionConfig> hbaseRecords = restoredSnapshots
     //            .apply("List Regions", new ListRegions());
-    PCollection<KV<String, Iterable<Mutation>>> hbaseRecords =
-        restoredSnapshots
-            .apply("List Regions", new ListRegions())
-            .apply(
-                "Read Regions",
-                new ReadRegions(
-                    options.getUseDynamicSplitting(),
-                    options.getMaxMutationsPerRequestThreshold(),
-                    options.getFilterLargeRows(),
-                    options.getFilterLargeRowsThresholdBytes(),
-                    options.getFilterLargeCells(),
-                    options.getFilterLargeCellsThresholdBytes(),
-                    options.getFilterLargeRowKeys(),
-                    options.getFilterLargeRowKeysThresholdBytes()));
 
     options.setBigtableTableId(ValueProvider.StaticValueProvider.of("NA"));
     CloudBigtableTableConfiguration bigtableConfiguration =
@@ -310,12 +296,25 @@ public class ImportJobFromHbaseSnapshot {
       bigtableConfiguration = builder.build();
     }
 
-    hbaseRecords.apply(
-        "Write to BigTable", CloudBigtableIO.writeToMultipleTables(bigtableConfiguration));
+    PCollection<Void> writtenRecords =
+        restoredSnapshots
+            .apply("List Regions", new ListRegions())
+            .apply(
+                "Read Regions and Write to Bigtable",
+                new ReadRegions(
+                    options.getUseDynamicSplitting(),
+                    options.getMaxMutationsPerRequestThreshold(),
+                    options.getFilterLargeRows(),
+                    options.getFilterLargeRowsThresholdBytes(),
+                    options.getFilterLargeCells(),
+                    options.getFilterLargeCellsThresholdBytes(),
+                    options.getFilterLargeRowKeys(),
+                    options.getFilterLargeRowKeysThresholdBytes(),
+                    bigtableConfiguration));
 
     // Clean up all the temporary restored snapshot HLinks after reading all the data
     restoredSnapshots
-        .apply(Wait.on(hbaseRecords))
+        .apply(Wait.on(writtenRecords))
         .apply("Clean restored files", ParDo.of(new CleanupRestoredSnapshots()));
 
     return pipeline;

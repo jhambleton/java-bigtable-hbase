@@ -38,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.concurrent.atomic.AtomicLong;
+import javax.annotation.Nullable;
 import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.coders.CannotProvideCoderException;
 import org.apache.beam.sdk.coders.Coder;
@@ -975,11 +976,13 @@ public class CloudBigtableIO {
      * <p>NOTE: This method does not create a new table in Cloud Bigtable. The table must already
      * exist.
      *
-     * @param context The context for the {@link DoFn}.
+     * @param element The element for the {@link DoFn}.
      */
     @ProcessElement
-    public void processElement(ProcessContext context) throws Exception {
-      KV<String, Iterable<Mutation>> element = context.element();
+    public void processElement(
+        @Element KV<String, Iterable<Mutation>> element,
+        @Nullable ProcessContext context) throws Exception {
+
       BufferedMutator mutator = getMutator(context, element.getKey());
       try {
         for (Mutation mutation : element.getValue()) {
@@ -1002,7 +1005,7 @@ public class CloudBigtableIO {
     }
 
     @FinishBundle
-    public void finishBundle(FinishBundleContext c) throws Exception {
+    public void finishBundle(@Nullable FinishBundleContext c) throws Exception {
       try {
         for (BufferedMutator bufferedMutator : mutators.values()) {
           try {
