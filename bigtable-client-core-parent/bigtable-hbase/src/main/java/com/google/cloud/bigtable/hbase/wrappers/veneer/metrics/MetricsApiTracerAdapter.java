@@ -121,8 +121,19 @@ public class MetricsApiTracerAdapter extends BaseApiTracer {
     lastRetryStatus = RetryStatus.ATTEMPT_RETRYABLE_FAILURE;
     rpcMetrics.markRetry();
     activeRpcCounter.dec();
+
+    Status.Code statusCode;
+    // Handle partial MutateRows failures
+    // the attempt will be marked as failed despite an OK status
+    // This is because an OK response can include failed entries that need to be retried
+    if (error == null) {
+      statusCode = Status.OK.getCode();
+    } else {
+      statusCode = Status.fromThrowable(error).getCode();
+    }
+
     BigtableClientMetrics.meter(
-            MetricLevel.Info, "grpc.errors." + Status.fromThrowable(error).getCode())
+            MetricLevel.Info, "grpc.errors." + statusCode)
         .mark();
   }
 
