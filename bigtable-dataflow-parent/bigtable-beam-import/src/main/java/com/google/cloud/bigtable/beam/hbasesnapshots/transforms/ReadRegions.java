@@ -92,8 +92,9 @@ public class ReadRegions
 
   private final boolean filterLargeRowKeys;
   private final int filterLargeRowKeysThresholdBytes;
-
+  private final @Nullable String checkpointPath;
   private final CloudBigtableTableConfiguration cloudBigtableTableConfiguration;
+
 
   public ReadRegions(
       boolean useDynamicSplitting,
@@ -104,6 +105,7 @@ public class ReadRegions
       int filterLargeCellThresholdBytes,
       boolean filterLargeRowKeys,
       int filterLargeRowKeysThresholdBytes,
+      @Nullable String checkpointPath,
       CloudBigtableTableConfiguration bigtableTableConfiguration) {
 
     this.useDynamicSplitting = useDynamicSplitting;
@@ -118,6 +120,7 @@ public class ReadRegions
     this.filterLargeRowKeys = filterLargeRowKeys;
     this.filterLargeRowKeysThresholdBytes = filterLargeRowKeysThresholdBytes;
 
+    this.checkpointPath = checkpointPath;
     this.cloudBigtableTableConfiguration = bigtableTableConfiguration;
   }
 
@@ -137,22 +140,35 @@ public class ReadRegions
 
     return regionConfig
         .apply("Read snapshot region and Write", ParDo.of(
-            new ReadRegionFn(this.useDynamicSplitting, createMutationsFn, writeFn)));
+            new ReadRegionFn(this.useDynamicSplitting, this.checkpointPath, createMutationsFn, writeFn)));
   }
 
   static class ReadRegionFn extends DoFn<RegionConfig, Void> {
+    static class RegionProgress {
+      public byte[] firstKey;
+      public byte[] lastKey;
+      public String regionName;
+    }
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private static final Logger LOG = LoggerFactory.getLogger(ReadRegionFn.class);
 
     private final boolean useDynamicSplitting;
+    private final @Nullable String checkpointPath;
     private final CreateMutationsFn createMutationsFn;
     private final CloudBigtableMultiTableWriteFn writeFn;
+    private final Map<RegionInfo, RangeSet<ByteKey>> regionProgress;
 
     public ReadRegionFn(boolean useDynamicSplitting,
+        @Nullable String checkpointPath,
         CreateMutationsFn createMutationsFn,
         CloudBigtableMultiTableWriteFn writeFn) {
       this.useDynamicSplitting = useDynamicSplitting;
+      this.checkpointPath = checkpointPath;
       this.createMutationsFn = createMutationsFn;
       this.writeFn = writeFn;
+      this.regionProgress = Maps.newHashMap();
     }
 
     @StartBundle
@@ -164,6 +180,138 @@ public class ReadRegions
     public void finishBundle(FinishBundleContext context) throws Exception {
       // ensure all buffered writes complete
       writeFn.finishBundle(null);
+
+      if (checkpointPath != null) {
+        try {
+          writeSuccessFiles();
+        } catch (IOException ex) {
+          LOG.error("Error writing checkpoint file(s)", ex);
+        }
+      }
+      regionProgress.clear();
+    }
+
+    private void writeSuccessFiles() throws IOException {
+      for (Map.Entry<RegionInfo, RangeSet<ByteKey>> rp : regionProgress.entrySet()) {
+        for (Range<ByteKey> range : rp.getValue().asRanges()) {
+          writeSuccessFile(rp.getKey(), range);
+        }
+      }
+    }
+
+    private void writeSuccessFile(RegionInfo region, Range<ByteKey> range) throws IOException {
+      ByteKeyRange bkRange = toRange(range);
+      ResourceId checkpointResource =
+          FileSystems.matchNewResource(checkpointPath, true);
+      String keySha = Hashing.sha256()
+          .newHasher()
+          .putBytes(bkRange.getStartKey().getBytes())
+          .putBytes(bkRange.getEndKey().getBytes())
+          .hash()
+          .toString();
+
+      // keys can be arbitrarily long and GCS limits the file name length to 1024 characters, so we
+      // use the "encoded name" (an MD5 of the name) instead, and then validate the full name on
+      // read in case of collisions.
+      String uniqueRegionCheckpoint =
+          region.getEncodedName() + "-" + keySha + ".SUCCESS";
+      ResourceId fullCheckpoint = checkpointResource.resolve(uniqueRegionCheckpoint,
+          StandardResolveOptions.RESOLVE_FILE);
+
+      try (WritableByteChannel out = FileSystems.create(fullCheckpoint, "text/plain")) {
+        try (OutputStream outStream = Channels.newOutputStream(out)) {
+          RegionProgress rp = new RegionProgress();
+          rp.firstKey = bkRange.getStartKey().getBytes();
+          rp.lastKey = bkRange.getEndKey().getBytes();
+          rp.regionName = region.getRegionNameAsString();
+          MAPPER.writeValue(outStream, rp);
+        }
+      }
+    }
+
+    private @Nonnull RegionProgress readCheckpointFile(ResourceId checkpoint) throws IOException {
+      try (ReadableByteChannel rbc = FileSystems.open(checkpoint)) {
+        try (InputStream is = Channels.newInputStream(rbc)) {
+          return MAPPER.readValue(is, RegionProgress.class);
+        }
+      }
+    }
+
+    /**
+     * Attempt to read the completed ranges for a given region from previously written checkpoint
+     * files.
+     */
+    private RangeSet<ByteKey> readCompletedRanges(RegionInfo regionInfo) {
+      RangeSet<ByteKey> result = TreeRangeSet.create();
+      if (checkpointPath == null) {
+        return result;
+      }
+
+      ResourceId checkpointResource =
+          FileSystems.matchNewResource(checkpointPath, true);
+      String prefix = regionInfo.getEncodedName() + "-*";
+      String matchGlob = checkpointResource.resolve(prefix, StandardResolveOptions.RESOLVE_FILE).toString();
+      List<RegionProgress> checkpoints = Lists.newArrayList();
+      try {
+        MatchResult matched = FileSystems.match(matchGlob, EmptyMatchTreatment.ALLOW);
+        for (Metadata md : matched.metadata()) {
+          checkpoints.add(readCheckpointFile(md.resourceId()));
+        }
+      } catch (IOException ex) {
+        LOG.error("Error globbing checkpoint files", ex);
+        return result;
+      }
+
+      if (checkpoints.isEmpty()) {
+        return result;
+      }
+
+      String expectedRegionName = regionInfo.getRegionNameAsString();
+      for (RegionProgress rp : checkpoints) {
+        if (!rp.regionName.equals(expectedRegionName)) {
+          continue;
+        }
+        result.add(toRange(rp.firstKey, rp.lastKey));
+      }
+      return result;
+    }
+
+    private static Range<ByteKey> toRange(byte[] startInclusive, byte[] endExclusive) {
+      return toRange(ByteKeyRange.of(
+          ByteKey.copyFrom(startInclusive),
+          ByteKey.copyFrom(endExclusive)));
+    }
+
+    private static Range<ByteKey> toRange(ByteKeyRange range) {
+      if (range.getStartKey().isEmpty() && range.getEndKey().isEmpty()) {
+        return Range.all();
+      } else if (range.getStartKey().isEmpty()) {
+        return Range.lessThan(range.getEndKey());
+      } else if (range.getEndKey().isEmpty()) {
+        return Range.atLeast(range.getStartKey());
+      } else {
+        return Range.closedOpen(range.getStartKey(), range.getEndKey());
+      }
+    }
+
+    private static ByteKeyRange toRange(Range<ByteKey> range) {
+      if (range.hasLowerBound() && range.hasUpperBound()) {
+        Preconditions.checkArgument(range.lowerBoundType() == BoundType.CLOSED,
+            "lower bound must be closed");
+        Preconditions.checkArgument(range.upperBoundType() == BoundType.OPEN,
+            "upper bound must be open");
+        return ByteKeyRange.of(range.lowerEndpoint(), range.upperEndpoint());
+      } else if (range.hasLowerBound()) {
+        Preconditions.checkArgument(range.lowerBoundType() == BoundType.CLOSED,
+            "lower bound must be closed");
+        return ByteKeyRange.of(range.lowerEndpoint(), ByteKey.EMPTY);
+      } else if (range.hasUpperBound()) {
+        Preconditions.checkArgument(range.upperBoundType() == BoundType.OPEN,
+            "upper bound must be open");
+        return ByteKeyRange.of(ByteKey.EMPTY, range.upperEndpoint());
+      } else {
+        return ByteKeyRange.ALL_KEYS;
+      }
     }
 
     @ProcessElement
@@ -173,19 +321,31 @@ public class ReadRegions
         RestrictionTracker<ByteKeyRange, ByteKey> tracker)
         throws Exception {
 
-      processRange(regionConfig, outputReceiver, tracker, tracker.currentRestriction());
+      RangeSet<ByteKey> rangesToRead = TreeRangeSet.create();
+      rangesToRead.add(toRange(tracker.currentRestriction()));
+
+      RangeSet<ByteKey> completedRanges = readCompletedRanges(regionConfig.getRegionInfo());
+      rangesToRead.removeAll(completedRanges);
+
+      for (Range<ByteKey> range : rangesToRead.asRanges()) {
+        if (processRange(regionConfig, outputReceiver, tracker, range)) {
+          break;
+        }
+      }
       tracker.tryClaim(ByteKey.EMPTY);
     }
 
     private boolean processRange(RegionConfig regionConfig, OutputReceiver<Void> outputReceiver,
-        RestrictionTracker<ByteKeyRange, ByteKey> tracker, ByteKeyRange range) throws Exception {
+        RestrictionTracker<ByteKeyRange, ByteKey> tracker, Range<ByteKey> range) throws Exception {
+      byte[] lastRow = null;
       boolean entireRangeProcessed = true;
-      ByteKeyRange bkRange = range;
+      ByteKeyRange bkRange = toRange(range);
       try (HBaseRegionScanner scanner = newScanner(regionConfig,
           bkRange.getStartKey().getBytes(),
           bkRange.getEndKey().getBytes())) {
         for (Result result = scanner.next(); result != null; result = scanner.next()) {
           if (tracker.tryClaim(ByteKey.copyFrom(result.getRow()))) {
+            lastRow = result.getRow();
             KV<String, Iterable<Mutation>> mutation =
                 createMutationsFn.processElement(KV.of(regionConfig.getSnapshotConfig(), result));
             if (mutation != null) {
@@ -198,6 +358,26 @@ public class ReadRegions
           }
         }
       }
+
+      if (entireRangeProcessed) {
+        // we exited "organically" and claimed the whole range. We may have not actually seen a row
+        // at the end key though, so bump the end to what we had in the initial scan range.
+        lastRow = bkRange.getEndKey().getBytes();
+      } else {
+        // otherwise we couldn't claim the next row.
+        // lastRow is inclusive (we read it), so change the end to be exclusive by adding one
+
+        // lastRow may be null if we never claimed anything
+        if (lastRow == null) {
+          return true;
+        }
+        // add a 0 to the end of the rowkey to make it exclusive
+        lastRow = Arrays.copyOf(lastRow, lastRow.length + 1);
+      }
+
+      RangeSet<ByteKey> ranges = regionProgress.computeIfAbsent(
+          regionConfig.getRegionInfo(), noop -> TreeRangeSet.create());
+      ranges.add(toRange(ByteKeyRange.of(bkRange.getStartKey(), ByteKey.copyFrom(lastRow))));
 
       return entireRangeProcessed;
     }

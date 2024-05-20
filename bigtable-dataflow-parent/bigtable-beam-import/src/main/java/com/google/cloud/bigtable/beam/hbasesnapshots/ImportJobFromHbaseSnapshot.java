@@ -42,6 +42,7 @@ import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.extensions.gcp.options.GcsOptions;
 import org.apache.beam.sdk.io.FileSystems;
+import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.io.hadoop.format.HadoopFormatIO;
 import org.apache.beam.sdk.options.Default;
 import org.apache.beam.sdk.options.Description;
@@ -180,6 +181,10 @@ public class ImportJobFromHbaseSnapshot {
     int getFilterLargeRowKeysThresholdBytes();
 
     void setFilterLargeRowKeysThresholdBytes(int value);
+
+    @Description("If set, uses this path to read and write checkpoint files.")
+    String getCheckpointPath();
+    void setCheckpointPath(String value);
   }
 
   public static void main(String[] args) throws Exception {
@@ -310,6 +315,7 @@ public class ImportJobFromHbaseSnapshot {
                     options.getFilterLargeCellsThresholdBytes(),
                     options.getFilterLargeRowKeys(),
                     options.getFilterLargeRowKeysThresholdBytes(),
+                    options.getCheckpointPath(),
                     bigtableConfiguration));
 
     // Clean up all the temporary restored snapshot HLinks after reading all the data

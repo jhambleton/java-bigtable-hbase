@@ -471,7 +471,7 @@ public class EndToEndIT {
     importOpts.setSnapshots(importOpts.getSnapshotName() + ":" + tableId);
     importOpts.setSnapshotName(null);
     importOpts.setRunner(DirectRunner.class);
-    //importOpts.setCheckpointPath("gs://igorbernstein-dev3/checkpoint-dir");
+    importOpts.setCheckpointPath("gs://igorbernstein-dev3/checkpoint-dir");
 
     ImportConfig config = ImportJobFromHbaseSnapshot.buildImportConfigFromPipelineOptions(
         importOpts, importOpts.as(
