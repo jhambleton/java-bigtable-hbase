@@ -16,6 +16,8 @@
 package com.google.cloud.bigtable.beam.hbasesnapshots;
 
 import com.google.api.core.InternalExtensionOnly;
+import com.google.api.services.dataflow.model.DebugOptions;
+import org.apache.beam.sdk.options.PipelineOptions;
 import com.google.cloud.bigtable.beam.CloudBigtableIO;
 import com.google.cloud.bigtable.beam.CloudBigtableTableConfiguration;
 import com.google.cloud.bigtable.beam.TemplateUtils;
@@ -28,6 +30,7 @@ import com.google.cloud.bigtable.beam.hbasesnapshots.dofn.RestoreSnapshot;
 import com.google.cloud.bigtable.beam.hbasesnapshots.transforms.ListRegions;
 import com.google.cloud.bigtable.beam.hbasesnapshots.transforms.ReadRegions;
 import com.google.cloud.bigtable.beam.sequencefiles.HBaseResultToMutationFn;
+import org.apache.beam.runners.dataflow.options.DataflowPipelineDebugOptions;
 import com.google.cloud.bigtable.beam.sequencefiles.ImportJob;
 import com.google.cloud.bigtable.beam.sequencefiles.Utils;
 import com.google.common.annotations.VisibleForTesting;
@@ -298,8 +301,10 @@ public class ImportJobFromHbaseSnapshot {
             options.getProject(),
             importConfig.getSourcepath(),
             importConfig.getRestorepath());
+    DataflowPipelineDebugOptions debugOptions = options.as(DataflowPipelineDebugOptions.class);
+    debugOptions.setGCThrashingPercentagePerPeriod(100.00);
 
-    Pipeline pipeline = Pipeline.create(options);
+    Pipeline pipeline = Pipeline.create(debugOptions);
 
     PCollection<SnapshotConfig> restoredSnapshots =
         pipeline.apply("Read Snapshot Configs", Create.of(snapshotConfigs));
