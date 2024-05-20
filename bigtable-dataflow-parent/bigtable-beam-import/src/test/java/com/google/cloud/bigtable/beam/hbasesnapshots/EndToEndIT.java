@@ -20,6 +20,7 @@ import com.google.api.services.storage.model.StorageObject;
 import com.google.bigtable.repackaged.com.google.gson.Gson;
 import com.google.cloud.bigtable.beam.hbasesnapshots.ImportJobFromHbaseSnapshot.ImportOptions;
 import com.google.cloud.bigtable.beam.hbasesnapshots.conf.HBaseSnapshotInputConfigBuilder;
+import com.google.cloud.bigtable.beam.hbasesnapshots.conf.ImportConfig;
 import com.google.cloud.bigtable.beam.hbasesnapshots.dofn.CleanupHBaseSnapshotRestoreFiles;
 import com.google.cloud.bigtable.beam.sequencefiles.HBaseResultToMutationFn;
 import com.google.cloud.bigtable.beam.test_env.EnvSetup;
@@ -48,9 +49,11 @@ import java.util.stream.StreamSupport;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
+import org.apache.beam.runners.direct.DirectRunner;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.PipelineResult.State;
 import org.apache.beam.sdk.extensions.gcp.options.GcpOptions;
+import org.apache.beam.sdk.extensions.gcp.options.GcsOptions;
 import org.apache.beam.sdk.extensions.gcp.util.GcsUtil;
 import org.apache.beam.sdk.extensions.gcp.util.gcsfs.GcsPath;
 import org.apache.beam.sdk.metrics.MetricQueryResults;
@@ -227,6 +230,7 @@ public class EndToEndIT {
     properties.applyTo(importPipelineOpts);
 
     ImportOptions importOpts = importPipelineOpts.as(ImportOptions.class);
+    // importOpts.setRunner(DirectRunner.class);
 
     // setup Bigtable options
     importOpts.setBigtableProject(StaticValueProvider.of(properties.getProjectId()));
@@ -445,6 +449,63 @@ public class EndToEndIT {
 
     // Verify the import using the sync job
     SyncTableOptions syncOpts = createSyncTableOptions();
+
+    PipelineResult result = SyncTableJob.buildPipeline(syncOpts).run();
+    state = result.waitUntilFinish();
+    Assert.assertEquals(State.DONE, state);
+
+    // Read the output files and validate that there are no mismatches.
+    Assert.assertEquals(0, readMismatchesFromOutputFiles().size());
+
+    // Validate the counters.
+    Map<String, Long> counters = getCountMap(result);
+    Assert.assertEquals(counters.get("ranges_matched"), (Long) 100L);
+    Assert.assertEquals(counters.get("ranges_not_matched"), (Long) 0L);
+  }
+
+  @Test
+  public void testHBaseSnapshotImport2() throws Exception {
+    // Start import
+    ImportOptions importOpts = createImportOptions();
+    // Force new version
+    importOpts.setSnapshots(importOpts.getSnapshotName() + ":" + tableId);
+    importOpts.setSnapshotName(null);
+    importOpts.setRunner(DirectRunner.class);
+    importOpts.setCheckpointPath("gs://igorbernstein-dev3/checkpoint-dir");
+
+    ImportConfig config = ImportJobFromHbaseSnapshot.buildImportConfigFromPipelineOptions(
+        importOpts, importOpts.as(
+            GcsOptions.class));
+
+    // run pipeline
+    State state = ImportJobFromHbaseSnapshot.buildPipelineWithMultipleSnapshots(importOpts, config).run().waitUntilFinish();
+    Assert.assertEquals(State.DONE, state);
+
+    // check that the .restore dir used for temp files has been removed
+    // The restore directory is stored relative to the snapshot directory and contains the job name
+    String bucket = GcsPath.fromUri(hbaseSnapshotDir).getBucket();
+    String restorePathPrefix =
+        CleanupHBaseSnapshotRestoreFiles.getListPrefix(HBaseSnapshotInputConfigBuilder.RESTORE_DIR);
+    List<StorageObject> allObjects = new ArrayList<>();
+    String nextToken;
+    do {
+      Objects objects = gcsUtil.listObjects(bucket, restorePathPrefix, null);
+      List<StorageObject> items = objects.getItems();
+      if (items != null) {
+        allObjects.addAll(items);
+      }
+      nextToken = objects.getNextPageToken();
+    } while (nextToken != null);
+
+    List<StorageObject> myObjects =
+        allObjects.stream()
+            .filter(o -> o.getName().contains(importOpts.getJobName()))
+            .collect(Collectors.toList());
+    Assert.assertTrue("Restore directory wasn't deleted", myObjects.isEmpty());
+
+    // Verify the import using the sync job
+    SyncTableOptions syncOpts = createSyncTableOptions();
+    syncOpts.setRunner(DirectRunner.class);
 
     PipelineResult result = SyncTableJob.buildPipeline(syncOpts).run();
     state = result.waitUntilFinish();
