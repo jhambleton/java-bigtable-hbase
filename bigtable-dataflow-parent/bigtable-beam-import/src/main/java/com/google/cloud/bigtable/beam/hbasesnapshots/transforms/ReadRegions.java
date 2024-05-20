@@ -5,7 +5,9 @@ package com.google.cloud.bigtable.beam.hbasesnapshots.transforms;
 import com.google.api.core.InternalApi;
 import com.google.cloud.bigtable.beam.hbasesnapshots.conf.RegionConfig;
 import com.google.cloud.bigtable.beam.hbasesnapshots.conf.SnapshotConfig;
+import com.google.common.primitives.UnsignedBytes;
 import java.io.IOException;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.beam.sdk.Pipeline;
@@ -17,6 +19,7 @@ import org.apache.beam.sdk.io.range.ByteKeyRange;
 import org.apache.beam.sdk.schemas.NoSuchSchemaException;
 import org.apache.beam.sdk.schemas.SchemaCoder;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.Filter;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.display.DisplayData;
@@ -66,6 +69,9 @@ public class ReadRegions
   private final boolean filterLargeRowKeys;
   private final int filterLargeRowKeysThresholdBytes;
 
+  private final Integer numShards;
+  private final Integer shardIndex;
+
   public ReadRegions(
       boolean useDynamicSplitting,
       int maxMutationsPerRequestThreshold,
@@ -74,7 +80,9 @@ public class ReadRegions
       boolean filterLargeCells,
       int filterLargeCellThresholdBytes,
       boolean filterLargeRowKeys,
-      int filterLargeRowKeysThresholdBytes) {
+      int filterLargeRowKeysThresholdBytes,
+      Integer numShards,
+      Integer shardIndex) {
     this.useDynamicSplitting = useDynamicSplitting;
     this.maxMutationsPerRequestThreshold = maxMutationsPerRequestThreshold;
 
@@ -86,6 +94,16 @@ public class ReadRegions
 
     this.filterLargeRowKeys = filterLargeRowKeys;
     this.filterLargeRowKeysThresholdBytes = filterLargeRowKeysThresholdBytes;
+
+    if (numShards != null && shardIndex == null) {
+      throw new IllegalArgumentException("if numShards is set, shardIndex must also be");
+    }
+    if (numShards != null && (shardIndex >= numShards || shardIndex < 0)) {
+      throw new IllegalArgumentException("shardIndex must be between [0, numShards)");
+    }
+
+    this.numShards = numShards;
+    this.shardIndex = shardIndex;
   }
 
   @Override
@@ -101,7 +119,23 @@ public class ReadRegions
       throw new RuntimeException(e);
     }
 
-    return regionConfig
+    PCollection<RegionConfig> maybeShardedRegions = regionConfig;
+    if (numShards != null) {
+      maybeShardedRegions = regionConfig.apply(
+          "Select regions for shard",
+          Filter.by(rc -> {
+            // encodedName is an MD5 hash of the region info and therefor should be well distributed
+            byte[] regionName = rc.getRegionInfo().getEncodedNameAsBytes();
+            long remainder = new BigInteger(regionName).mod(BigInteger.valueOf(numShards)).longValue();
+            boolean shouldTake = remainder == shardIndex;
+            ReadRegionFn.LOG.info("Region {} was {} due to sharding",
+                rc.getRegionInfo().getRegionNameAsString(),
+                shouldTake ? "taken" : "skipped");
+            return shouldTake;
+          }));
+    }
+
+    return maybeShardedRegions
         .apply("Read snapshot region", ParDo.of(new ReadRegionFn(this.useDynamicSplitting)))
         .setCoder(KvCoder.of(snapshotConfigSchemaCoder, hbaseResultCoder))
         .apply(
