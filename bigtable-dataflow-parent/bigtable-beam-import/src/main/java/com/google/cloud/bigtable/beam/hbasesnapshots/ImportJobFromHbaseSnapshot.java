@@ -191,6 +191,12 @@ public class ImportJobFromHbaseSnapshot {
     Boolean getDeleteRestoredSnapshots();
 
     void setDeleteRestoredSnapshots(Boolean value);
+
+    @Description("Specifies whether the store step should be skipped.")
+    @Default.Boolean(false)
+    Boolean getSkipRestoreStep();
+
+    void setSkipRestoreStep(Boolean value);
   }
 
   public static void main(String[] args) throws Exception {
@@ -291,8 +297,7 @@ public class ImportJobFromHbaseSnapshot {
 
     PCollection<SnapshotConfig> restoredSnapshots =
         pipeline.apply("Read Snapshot Configs", Create.of(snapshotConfigs));
-    final boolean snapshotNeedsRestore = options.getRestorePath() == null;
-    if (snapshotNeedsRestore) {
+    if (!options.getSkipRestoreStep()) {
       restoredSnapshots =
           restoredSnapshots.apply("Restore Snapshots", ParDo.of(new RestoreSnapshot()));
     }
