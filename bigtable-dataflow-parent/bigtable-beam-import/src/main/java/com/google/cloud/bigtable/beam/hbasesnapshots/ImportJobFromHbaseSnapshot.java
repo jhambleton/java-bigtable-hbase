@@ -184,6 +184,15 @@ public class ImportJobFromHbaseSnapshot {
 
     void setFilterLargeRowKeysThresholdBytes(int value);
 
+    @Description("Specifies the number of shards to use when loading the snapshot. "
+        + "If set, shardIndex must also be set.")
+    Integer getNumShards();
+    void setNumShards(Integer value);
+
+    @Description("Specifies the shard index from [0, numShards) that this load represents.")
+    Integer getShardIndex();
+    void setShardIndex(Integer value);
+
     @Description("Specifies the path to the restored Snapshot files.")
     String getRestorePath();
 
@@ -331,7 +340,9 @@ public class ImportJobFromHbaseSnapshot {
                     options.getFilterLargeCells(),
                     options.getFilterLargeCellsThresholdBytes(),
                     options.getFilterLargeRowKeys(),
-                    options.getFilterLargeRowKeysThresholdBytes()));
+                    options.getFilterLargeRowKeysThresholdBytes(),
+                    options.getNumShards(),
+                    options.getShardIndex()));
 
     options.setBigtableTableId(ValueProvider.StaticValueProvider.of("NA"));
     CloudBigtableTableConfiguration bigtableConfiguration =
