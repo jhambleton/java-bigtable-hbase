@@ -197,6 +197,12 @@ public class ImportJobFromHbaseSnapshot {
     Boolean getSkipRestoreStep();
 
     void setSkipRestoreStep(Boolean value);
+
+    @Description("Specifies whether to perform only restore step.")
+    @Default.Boolean(false)
+    Boolean getPerformOnlyRestoreStep();
+
+    void setPerformOnlyRestoreStep(Boolean value);
   }
 
   public static void main(String[] args) throws Exception {
@@ -301,7 +307,9 @@ public class ImportJobFromHbaseSnapshot {
       restoredSnapshots =
           restoredSnapshots.apply("Restore Snapshots", ParDo.of(new RestoreSnapshot()));
     }
-
+    if (options.getPerformOnlyRestoreStep()) {
+        return pipeline;
+    }
     // Read records from hbase region files and write to Bigtable
     //    PCollection<RegionConfig> hbaseRecords = restoredSnapshots
     //            .apply("List Regions", new ListRegions());
