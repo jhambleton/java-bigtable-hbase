@@ -332,4 +332,8 @@ public class BigtableOptionsFactory {
    */
   public static final String BIGTABLE_ENABLE_BULK_MUTATION_FLOW_CONTROL =
       "google.bigtable.enable.bulk.mutation.flow.control";
+
+  /** Sets if client side metrics should be enabled. Client side metrics is enabled by default. */
+  public static final String BIGTABLE_ENABLE_CLIENT_SIDE_METRICS =
+      "google.bigtable.enable.client.side.metrics";
 }
