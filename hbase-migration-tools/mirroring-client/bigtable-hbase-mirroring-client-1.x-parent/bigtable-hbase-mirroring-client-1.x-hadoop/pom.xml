@@ -14,36 +14,50 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 -->
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
     <groupId>com.google.cloud.bigtable</groupId>
     <artifactId>bigtable-hbase-mirroring-client-1.x-parent</artifactId>
-    <version>0.7.1</version> <!-- {x-version-update:bigtable-hbase-mirroring:current} -->
+    <version>0.10.6</version> <!-- {x-version-update:bigtable-hbase-mirroring:current} -->
   </parent>
 
   <artifactId>bigtable-hbase-mirroring-client-1.x-hadoop</artifactId>
   <packaging>jar</packaging>
-  <version>0.7.1</version> <!-- {x-version-update:bigtable-hbase-mirroring:current} -->
+  <version>0.10.6</version> <!-- {x-version-update:bigtable-hbase-mirroring:current} -->
 
   <name>${project.groupId}:${project.artifactId}</name>
   <description>
     Bigtable/HBase Mirroring Client conforming to HBase API 1.x. Uses hbase-client and shades all dependencies.
   </description>
 
-  <properties>
-    <!-- define a property that can be ignored by renovate -->
-    <hbase1-hadoop-slf4j.version>1.6.1</hbase1-hadoop-slf4j.version>
-  </properties>
 
   <dependencies>
+    <!-- Environment deps first -->
+    <dependency>
+      <groupId>org.apache.hbase</groupId>
+      <artifactId>hbase-client</artifactId>
+      <version>${hbase1.version}</version>
+      <exclusions>
+        <exclusion>
+          <groupId>log4j</groupId>
+          <artifactId>log4j</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>ch.qos.reload4j</groupId>
+      <artifactId>reload4j</artifactId>
+      <version>${reload4j.version}</version>
+      <scope>runtime</scope>
+    </dependency>
+
     <!-- Internal dependencies that will be shaded along with their transitive dependencies. -->
     <dependency>
       <groupId>com.google.cloud.bigtable</groupId>
       <artifactId>bigtable-hbase-mirroring-client-1.x-shaded</artifactId>
-      <version>0.7.1</version> <!-- {x-version-update:bigtable-hbase-mirroring:current} -->
+      <version>0.10.6</version> <!-- {x-version-update:bigtable-hbase-mirroring:current} -->
       <scope>compile</scope>
       <exclusions>
         <!-- hbase-shaded-client will be replaced with hbase-client -->
@@ -60,76 +74,39 @@ limitations under the License.
           <groupId>${project.groupId}</groupId>
           <artifactId>bigtable-hbase-mirroring-client-1.x</artifactId>
         </exclusion>
-        <exclusion>
-          <groupId>io.opencensus</groupId>
-          <artifactId>*</artifactId>
-        </exclusion>
       </exclusions>
-    </dependency>
-
-    <!-- Manually promote public dependencies: This is necessary to avoid flattening hbase-shaded-client's dependency tree -->
-    <dependency>
-      <groupId>org.apache.hbase</groupId>
-      <artifactId>hbase-client</artifactId>
-      <version>${hbase1.version}</version>
-      <exclusions>
-        <exclusion>
-          <groupId>log4j</groupId>
-          <artifactId>log4j</artifactId>
-        </exclusion>
-      </exclusions>
-    </dependency>
-
-    <!-- Manually promote dependencies: This is necessary to avoid flattening hbase-shaded-client's dependency tree -->
-    <dependency>
-      <groupId>commons-logging</groupId>
-      <artifactId>commons-logging</artifactId>
-      <version>${commons-logging.version}</version>
-    </dependency>
-
-    <!-- for compatibility with bigtable-hbase-client-1.x-hadoop -->
-    <dependency>
-      <groupId>org.slf4j</groupId>
-      <artifactId>slf4j-api</artifactId>
-      <version>${hbase1-hadoop-slf4j.version}</version>
-    </dependency>
-
-    <dependency>
-      <groupId>ch.qos.reload4j</groupId>
-      <artifactId>reload4j</artifactId>
-      <version>${reload4j.version}</version>
-      <scope>runtime</scope>
     </dependency>
   </dependencies>
 
   <build>
+    <pluginManagement>
+      <plugins>
+        <!-- The only dep that has changed in this module is hbase-shaded-client to hbase-client. hbase-client
+        does not adhere to our enforcement rules and we dont have any way to influence it. So just disable enforcement.
+        TODO: remove this once hbase deps become provided
+        -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-enforcer-plugin</artifactId>
+          <executions>
+            <execution>
+              <id>enforce</id>
+              <configuration>
+                <skip>true</skip>
+              </configuration>
+            </execution>
+            <execution>
+              <id>enforce-banned-deps</id>
+              <configuration>
+                <skip>true</skip>
+              </configuration>
+            </execution>
+          </executions>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+
     <plugins>
-      <!-- disable google-cloud-shared-config enforcement checks because
-      hbase-client's dependency subtree doesn't follow the same rules and is
-      unable to be fixed here -->
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-enforcer-plugin</artifactId>
-        <executions>
-          <execution>
-            <id>enforce</id>
-            <configuration>
-              <skip>true</skip>
-            </configuration>
-          </execution>
-          <!-- This must be a drop in replacement for hbase-client, so can't
-            manage hbase's deps -->
-          <execution>
-            <id>enforce-banned-deps</id>
-            <goals>
-              <goal>enforce</goal>
-            </goals>
-            <configuration>
-              <skip>true</skip>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-shade-plugin</artifactId>
@@ -161,9 +138,6 @@ limitations under the License.
                   <include>
                     com.google.cloud.bigtable:bigtable-hbase-mirroring-client-1.x-shaded
                   </include>
-                  <include>
-                    com.google.cloud.bigtable:bigtable-hbase-mirroring-client-1.x
-                  </include>
                 </includes>
               </artifactSet>
               <relocations>
@@ -183,7 +157,7 @@ limitations under the License.
       <plugin>
         <groupId>com.google.cloud.bigtable.test</groupId>
         <artifactId>bigtable-build-helper</artifactId>
-        <version>2.12.1</version> <!-- {x-version-update:bigtable-client-parent:current} -->
+        <version>2.15.6</version> <!-- {x-version-update:bigtable-client-parent:current} -->
 
         <executions>
           <execution>
@@ -232,25 +206,6 @@ limitations under the License.
             </configuration>
           </execution>
         </executions>
-      </plugin>
-
-      <!-- skip for shaded jar-->
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-dependency-plugin</artifactId>
-        <configuration>
-          <ignoredDependencies>
-            <dependency>*</dependency>
-          </ignoredDependencies>
-        </configuration>
-      </plugin>
-      <!-- skip for shaded jar-->
-      <plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>clirr-maven-plugin</artifactId>
-        <configuration>
-          <skip>true</skip>
-        </configuration>
       </plugin>
     </plugins>
   </build>

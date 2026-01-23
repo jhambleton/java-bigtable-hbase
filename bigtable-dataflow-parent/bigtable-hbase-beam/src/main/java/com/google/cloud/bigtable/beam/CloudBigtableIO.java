@@ -19,6 +19,7 @@ import static com.google.cloud.bigtable.beam.CloudBigtableScanConfiguration.Scan
 
 import com.google.bigtable.repackaged.com.google.api.core.InternalApi;
 import com.google.bigtable.repackaged.com.google.api.core.InternalExtensionOnly;
+import com.google.bigtable.repackaged.com.google.api.gax.rpc.WatchdogTimeoutException;
 import com.google.bigtable.repackaged.com.google.bigtable.v2.ReadRowsRequest;
 import com.google.bigtable.repackaged.com.google.cloud.bigtable.data.v2.models.KeyOffset;
 import com.google.bigtable.repackaged.com.google.common.annotations.VisibleForTesting;
@@ -32,13 +33,14 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.coders.CannotProvideCoderException;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderRegistry;
@@ -48,6 +50,7 @@ import org.apache.beam.sdk.io.range.ByteKey;
 import org.apache.beam.sdk.io.range.ByteKeyRangeTracker;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Gauge;
+import org.apache.beam.sdk.metrics.Lineage;
 import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider;
@@ -58,6 +61,7 @@ import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
@@ -130,7 +134,6 @@ import org.slf4j.LoggerFactory;
  *          .build()));
  * }</pre>
  */
-@Experimental
 public class CloudBigtableIO {
 
   /**
@@ -140,6 +143,7 @@ public class CloudBigtableIO {
   @InternalExtensionOnly
   @SuppressWarnings("serial")
   abstract static class AbstractSource extends BoundedSource<Result> {
+
     protected static final Logger SOURCE_LOG = LoggerFactory.getLogger(AbstractSource.class);
     protected static final long SIZED_BASED_MAX_SPLIT_COUNT = 4_000;
     static final long COUNT_MAX_SPLIT_COUNT = 15_360;
@@ -299,7 +303,7 @@ public class CloudBigtableIO {
      *
      * @param options The pipeline options.
      * @return The estimated size of the data, in bytes.
-     * @throws IOException
+     * @throws IOException if any.
      */
     @Override
     public long getEstimatedSizeBytes(PipelineOptions options) throws IOException {
@@ -342,7 +346,7 @@ public class CloudBigtableIO {
      * Splits the region based on the start and stop key. Uses {@link Bytes#split(byte[], byte[],
      * int)} under the covers.
      *
-     * @throws IOException
+     * @throws IOException if any.
      */
     protected List<SourceWithKeys> split(
         long regionSize, long desiredBundleSizeBytes, byte[] startKey, byte[] stopKey)
@@ -479,6 +483,7 @@ public class CloudBigtableIO {
    */
   @InternalExtensionOnly
   public static class Source extends AbstractSource {
+
     private static final long serialVersionUID = -5580115943635114126L;
 
     Source(CloudBigtableScanConfiguration configuration) {
@@ -487,6 +492,7 @@ public class CloudBigtableIO {
 
     // TODO: Add a method on the server side that will be a more precise split based on server-side
     // statistics
+
     /**
      * Splits the table based on keys that belong to tablets, known as "regions" in the HBase API.
      * The current implementation uses the HBase {@link RegionLocator} interface, which calls {@link
@@ -536,6 +542,7 @@ public class CloudBigtableIO {
     }
 
     static class SourceSerializationProxy extends AbstractSerializationProxy {
+
       public SourceSerializationProxy(CloudBigtableScanConfiguration configuration) {
         super(configuration);
       }
@@ -552,6 +559,7 @@ public class CloudBigtableIO {
    * with a potential filter via a {@link Scan}.
    */
   protected static class SourceWithKeys extends AbstractSource {
+
     private static final long serialVersionUID = 1L;
     /**
      * An estimate of the size of the source, in bytes.
@@ -591,6 +599,7 @@ public class CloudBigtableIO {
 
     // TODO: Add a method on the server side that will be a more precise split based on server-
     // side statistics
+
     /**
      * Splits the bundle based on the assumption that the data is distributed evenly between
      * startKey and stopKey. That assumption may not be correct for any specific start/stop key
@@ -646,9 +655,13 @@ public class CloudBigtableIO {
       }
     }
   }
+
   /** Reads rows for a specific {@link Table}, usually filtered by a {@link Scan}. */
   @VisibleForTesting
   static class Reader extends BoundedReader<Result> {
+
+    static final String RETRY_IDLE_TIMEOUT = "google.cloud.bigtable.retry.idle.timeout";
+
     private static final Logger READER_LOG = LoggerFactory.getLogger(Reader.class);
 
     private CloudBigtableIO.AbstractSource source;
@@ -659,6 +672,11 @@ public class CloudBigtableIO {
     protected long workStart;
     private final AtomicLong rowsRead = new AtomicLong();
     private final ByteKeyRangeTracker rangeTracker;
+    private transient Result lastScannedRow;
+
+    private final AtomicInteger attempt = new AtomicInteger(3);
+
+    private transient boolean reportedLineage;
 
     @VisibleForTesting
     Reader(CloudBigtableIO.AbstractSource source) {
@@ -674,6 +692,7 @@ public class CloudBigtableIO {
     public boolean start() throws IOException {
       initializeScanner();
       workStart = System.currentTimeMillis();
+      reportLineageOnce();
       return advance();
     }
 
@@ -692,7 +711,37 @@ public class CloudBigtableIO {
     /** Calls {@link ResultScanner#next()}. */
     @Override
     public boolean advance() throws IOException {
+      try {
+        boolean hasMore = tryAdvance();
+        // reset attempt after a success read
+        attempt.set(3);
+        return hasMore;
+      } catch (Throwable e) {
+        // if retry idle timeout is disabled, throw the exception
+        if (!source.getConfiguration().toHBaseConfig().getBoolean(RETRY_IDLE_TIMEOUT, true)) {
+          throw e;
+        }
+        // Exception is not idle timeout, throw it
+        Throwable exception = findCause(e, WatchdogTimeoutException.class);
+        if (exception == null) {
+          throw e;
+        }
+        if (exception.getMessage() == null || !exception.getMessage().contains("idle")) {
+          throw e;
+        }
+        // Run out ot retry attempt, throw the exception
+        if (attempt.decrementAndGet() <= 0) {
+          throw e;
+        }
+        READER_LOG.warn("got idle timeout exception, will try to reset the scanner and retry", e);
+        resetScanner();
+        return tryAdvance();
+      }
+    }
+
+    private boolean tryAdvance() throws IOException {
       Result row = scanner.next();
+      lastScannedRow = row;
       if (row != null && rangeTracker.tryReturnRecordAt(true, ByteKey.copyFrom(row.getRow()))) {
         current = row;
         rowsRead.addAndGet(1l);
@@ -702,6 +751,39 @@ public class CloudBigtableIO {
         rangeTracker.markDone();
         return false;
       }
+    }
+
+    private void resetScanner() throws IOException {
+      CloudBigtableScanConfiguration scanConfiguration = source.getConfiguration();
+      Scan scan;
+      if (lastScannedRow != null) {
+        byte[] rowKey = lastScannedRow.getRow();
+        // ScanConfiguration always gets start key and end key from the RowRange, and it expects
+        // start key to be inclusive and end key to be exclusive.
+        byte[] newStartKey = Arrays.copyOf(rowKey, rowKey.length + 1);
+        scan =
+            scanConfiguration.toBuilder()
+                .withKeys(newStartKey, scanConfiguration.getStopRow())
+                .build()
+                .getScanValueProvider()
+                .get();
+      } else {
+        scan = scanConfiguration.getScanValueProvider().get();
+        READER_LOG.info("last scanned row key is null, haven't read any row yet");
+      }
+
+      scanner =
+          connection
+              .getTable(TableName.valueOf(source.getConfiguration().getTableId()))
+              .getScanner(scan);
+    }
+
+    static Throwable findCause(Throwable e, Class<? extends Throwable> cls) {
+      Throwable throwable = e;
+      while (throwable != null && !cls.isAssignableFrom(e.getClass())) {
+        throwable = throwable.getCause();
+      }
+      return throwable;
     }
 
     @Override
@@ -836,6 +918,19 @@ public class CloudBigtableIO {
           Bytes.toStringBinary(rangeTracker.getStartPosition().getBytes()),
           Bytes.toStringBinary(rangeTracker.getStopPosition().getBytes()));
     }
+
+    void reportLineageOnce() {
+      if (!reportedLineage) {
+        Lineage.getSources()
+            .add(
+                "bigtable",
+                ImmutableList.of(
+                    source.getConfiguration().getProjectId(),
+                    source.getConfiguration().getInstanceId(),
+                    source.getConfiguration().getTableId()));
+        reportedLineage = true;
+      }
+    }
   }
 
   ///////////////////// Write Class /////////////////////////////////
@@ -843,8 +938,6 @@ public class CloudBigtableIO {
   /**
    * This is a DoFn that relies on {@link BufferedMutator} as the implementation to write data to
    * Cloud Bigtable. The main function of this class is to manage Aggregators relating to mutations.
-   *
-   * @param <InputType>
    */
   private abstract static class BufferedMutatorDoFn<InputType>
       extends AbstractCloudBigtableTableDoFn<InputType, Void> {
@@ -897,8 +990,10 @@ public class CloudBigtableIO {
   @InternalExtensionOnly
   public static class CloudBigtableSingleTableBufferedWriteFn
       extends BufferedMutatorDoFn<Mutation> {
+
     private static final long serialVersionUID = 2L;
     private transient BufferedMutator mutator;
+    private transient boolean reportedLineage;
 
     public CloudBigtableSingleTableBufferedWriteFn(CloudBigtableTableConfiguration config) {
       super(config);
@@ -936,6 +1031,20 @@ public class CloudBigtableIO {
         logExceptions(null, exception);
         rethrowException(exception);
       }
+      reportLineageOnce();
+    }
+
+    void reportLineageOnce() {
+      if (!reportedLineage) {
+        Lineage.getSinks()
+            .add(
+                "bigtable",
+                ImmutableList.of(
+                    config.getProjectId(),
+                    config.getInstanceId(),
+                    ((CloudBigtableTableConfiguration) getConfig()).getTableId()));
+        reportedLineage = true;
+      }
     }
   }
 
@@ -955,10 +1064,12 @@ public class CloudBigtableIO {
   @InternalExtensionOnly
   public static class CloudBigtableMultiTableWriteFn
       extends BufferedMutatorDoFn<KV<String, Iterable<Mutation>>> {
+
     private static final long serialVersionUID = 2L;
 
     // Stats
     private transient Map<String, BufferedMutator> mutators;
+    private transient boolean reportedLineage;
 
     public CloudBigtableMultiTableWriteFn(CloudBigtableConfiguration config) {
       super(config);
@@ -1014,6 +1125,19 @@ public class CloudBigtableIO {
         }
       } finally {
         mutators.clear();
+        reportLineageOnce();
+      }
+    }
+
+    void reportLineageOnce() {
+      if (!reportedLineage) {
+        for (String tableName : mutators.keySet()) {
+          Lineage.getSinks()
+              .add(
+                  "bigtable",
+                  ImmutableList.of(config.getProjectId(), config.getInstanceId(), tableName));
+          reportedLineage = true;
+        }
       }
     }
   }
@@ -1023,6 +1147,7 @@ public class CloudBigtableIO {
    * Cloud Bigtable.
    */
   private static class CloudBigtableWriteTransform<T> extends PTransform<PCollection<T>, PDone> {
+
     private static final long serialVersionUID = -2888060194257930027L;
 
     private final DoFn<T, Void> function;

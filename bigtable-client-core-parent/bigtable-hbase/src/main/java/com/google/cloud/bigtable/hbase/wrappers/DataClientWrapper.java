@@ -17,6 +17,7 @@ package com.google.cloud.bigtable.hbase.wrappers;
 
 import com.google.api.core.ApiFuture;
 import com.google.api.core.InternalApi;
+import com.google.api.gax.rpc.ResponseObserver;
 import com.google.cloud.bigtable.data.v2.models.ConditionalRowMutation;
 import com.google.cloud.bigtable.data.v2.models.Filters;
 import com.google.cloud.bigtable.data.v2.models.KeyOffset;
@@ -24,7 +25,6 @@ import com.google.cloud.bigtable.data.v2.models.Query;
 import com.google.cloud.bigtable.data.v2.models.ReadModifyWriteRow;
 import com.google.cloud.bigtable.data.v2.models.RowMutation;
 import com.google.protobuf.ByteString;
-import io.grpc.stub.StreamObserver;
 import java.io.IOException;
 import java.util.List;
 import javax.annotation.Nullable;
@@ -87,8 +87,14 @@ public interface DataClientWrapper extends AutoCloseable {
 
   /** Read {@link Result} asynchronously, and pass them to a stream observer to be processed. */
   // TODO: once veneer is implemented update this with gax's ResponseObserver.
-  void readRowsAsync(Query request, StreamObserver<Result> observer);
+  void readRowsAsync(Query request, ResponseObserver<Result> observer);
 
   @Override
   void close() throws IOException;
+
+  /**
+   * Perform a scan over {@link Result}s, in key order, using a paginator. maxSegmentByteSize is
+   * used for testing purposes only.
+   */
+  ResultScanner readRows(Query.QueryPaginator paginator, long maxSegmentByteSize);
 }

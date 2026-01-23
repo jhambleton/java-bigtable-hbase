@@ -20,7 +20,7 @@ limitations under the License.
   <parent>
     <groupId>com.google.cloud.bigtable</groupId>
     <artifactId>bigtable-hbase-1.x-parent</artifactId>
-    <version>2.12.1</version> <!-- {x-version-update:bigtable-client-parent:current} -->
+    <version>2.15.6</version> <!-- {x-version-update:bigtable-client-parent:current} -->
   </parent>
 
   <artifactId>bigtable-hbase-1.x-mapreduce</artifactId>
@@ -33,11 +33,6 @@ limitations under the License.
     to be removed
     in order to work with Bigtable.
   </description>
-
-  <properties>
-    <mrunit.version>1.1.0</mrunit.version>
-    <google-cloud-bigtable-emulator.version>0.165.0</google-cloud-bigtable-emulator.version>
-  </properties>
 
   <!-- NOTE: this artifact is designed to be used alongside hbase-server via
   the bin/hbase script. Its primary intention is to produce a single jar that can
@@ -65,7 +60,7 @@ limitations under the License.
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>bigtable-hbase-1.x-hadoop</artifactId>
-      <version>2.12.1</version> <!-- {x-version-update:bigtable-client-parent:current} -->
+      <version>2.15.6</version> <!-- {x-version-update:bigtable-client-parent:current} -->
       <exclusions>
         <!-- we need hbase-server instead of hbase-client -->
         <exclusion>
@@ -92,10 +87,15 @@ limitations under the License.
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>org.apache.mrunit</groupId>
-      <artifactId>mrunit</artifactId>
-      <version>${mrunit.version}</version>
-      <classifier>hadoop2</classifier>
+      <groupId>com.google.truth</groupId>
+      <artifactId>truth</artifactId>
+      <version>${truth.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <version>${mockito.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -110,13 +110,8 @@ limitations under the License.
       <version>${hbase1.version}</version>
       <scope>test</scope>
       <exclusions>
-        <!-- exclusion to avoid version conflict with existing artifact  -->
         <exclusion>
-          <groupId>org.slf4j</groupId>
-          <artifactId>slf4j-api</artifactId>
-        </exclusion>
-        <!-- exclusion to avoid version conflict with existing artifact  -->
-        <exclusion>
+          <!-- Exclude conflict with hbase-server -->
           <groupId>org.slf4j</groupId>
           <artifactId>slf4j-log4j12</artifactId>
         </exclusion>
@@ -125,56 +120,16 @@ limitations under the License.
     <dependency>
       <groupId>com.google.cloud.bigtable</groupId>
       <artifactId>bigtable-internal-test-helper</artifactId>
-      <version>2.12.1</version> <!-- {x-version-update:bigtable-client-parent:current} -->
+      <version>2.15.6</version> <!-- {x-version-update:bigtable-client-parent:current} -->
       <scope>test</scope>
     </dependency>
   </dependencies>
 
   <build>
     <plugins>
-      <!-- This is basically a replacement for the mapreduce jobs in hbase-server,
-      but with the implementation replaced by bigtable-hbase-1.x-hadoop. This means
-      that all of our dependencies are dictated by hbase-server. hbase-server
-      has a fairly complex dependency tree with a lot of exclusions. Trying to
-      replicate it here to declare exact deps our job uses creates an undue burden.-->
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-dependency-plugin</artifactId>
-        <configuration>
-          <ignoredDependencies>
-            <dependency>*</dependency>
-          </ignoredDependencies>
-        </configuration>
-      </plugin>
-
-      <plugin>
-        <!-- skip UpperBound enforcement for hadoop jars -->
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-enforcer-plugin</artifactId>
-        <executions>
-          <execution>
-            <id>enforce</id>
-            <goals>
-              <goal>enforce</goal>
-            </goals>
-            <configuration>
-              <skip>true</skip>
-            </configuration>
-          </execution>
-          <!-- We are not introducing any new deps here. We expect to be
-          running in hadoop's provided classpath -->
-          <execution>
-            <id>enforce-banned-deps</id>
-            <configuration>
-              <skip>true</skip>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>build-helper-maven-plugin</artifactId>
-        <version>3.3.0</version>
         <executions>
           <execution>
             <id>add-source</id>
@@ -231,24 +186,23 @@ limitations under the License.
       <plugin>
         <groupId>com.google.cloud.bigtable.test</groupId>
         <artifactId>bigtable-build-helper</artifactId>
-        <version>2.12.1</version> <!-- {x-version-update:bigtable-client-parent:current} -->
+        <version>2.15.6</version> <!-- {x-version-update:bigtable-client-parent:current} -->
         <executions>
           <execution>
-            <id>verify-mirror-deps</id>
+            <id>verify-mirror-deps-hbase</id>
             <phase>verify</phase>
             <goals>
               <goal>verify-mirror-deps</goal>
             </goals>
             <configuration>
               <targetDependencies>
-                <targetDependency>org.apache.hbase:hbase-server:${hbase1.version}</targetDependency>
+                <targetDependency>org.apache.hbase:hbase-server</targetDependency>
               </targetDependencies>
               <ignoredDependencies>
-                <!-- TODO: figure out why this diverges from hbase-client -->
-                <ignoredDependency>org.slf4j:slf4j-api</ignoredDependency>
-                <!-- For some reason, hbase-server pulls in test deps -->
-                <ignoredDependency>junit:junit</ignoredDependency>
-                <ignoredDependency>org.hamcrest:hamcrest-core</ignoredDependency>
+
+                <!-- hbase-common pulls in test deps via hbase-annotations, exclude them from mirror check -->
+                <dependency>junit:junit</dependency>
+                <dependency>org.hamcrest:hamcrest-core</dependency>
               </ignoredDependencies>
             </configuration>
           </execution>

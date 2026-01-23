@@ -32,6 +32,7 @@ import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_EM
 import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_ENABLE_BULK_MUTATION_FLOW_CONTROL;
 import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_ENABLE_CLIENT_SIDE_METRICS;
 import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_HOST_KEY;
+import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_JWT_AUDIENCE_KEY;
 import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_MUTATE_RPC_ATTEMPT_TIMEOUT_MS_KEY;
 import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_MUTATE_RPC_TIMEOUT_MS_KEY;
 import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_NULL_CREDENTIAL_ENABLE_KEY;
@@ -44,6 +45,7 @@ import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_SE
 import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_SERVICE_ACCOUNT_JSON_KEYFILE_LOCATION_KEY;
 import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_SERVICE_ACCOUNT_JSON_VALUE_KEY;
 import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_SERVICE_ACCOUNT_P12_KEYFILE_LOCATION_KEY;
+import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_TEST_IDLE_TIMEOUT_MS;
 import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_USE_BATCH;
 import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_USE_CACHED_DATA_CHANNEL_POOL;
 import static com.google.cloud.bigtable.hbase.BigtableOptionsFactory.BIGTABLE_USE_PLAINTEXT_NEGOTIATION;
@@ -63,6 +65,7 @@ import com.google.api.gax.batching.BatchingSettings;
 import com.google.api.gax.batching.FlowControlSettings;
 import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.api.gax.core.NoCredentialsProvider;
+import com.google.api.gax.grpc.ChannelPoolSettings;
 import com.google.api.gax.grpc.InstantiatingGrpcChannelProvider;
 import com.google.api.gax.rpc.FixedHeaderProvider;
 import com.google.api.gax.rpc.ServerStreamingCallSettings;
@@ -70,7 +73,6 @@ import com.google.api.gax.rpc.StatusCode;
 import com.google.api.gax.rpc.StubSettings;
 import com.google.api.gax.rpc.UnaryCallSettings;
 import com.google.auth.Credentials;
-import com.google.auth.oauth2.GoogleCredentials;
 import com.google.auth.oauth2.ServiceAccountJwtAccessCredentials;
 import com.google.cloud.bigtable.admin.v2.BigtableInstanceAdminSettings;
 import com.google.cloud.bigtable.admin.v2.BigtableTableAdminSettings;
@@ -81,6 +83,7 @@ import com.google.cloud.bigtable.data.v2.models.Query;
 import com.google.cloud.bigtable.data.v2.models.Row;
 import com.google.cloud.bigtable.data.v2.stub.BigtableBatchingCallSettings;
 import com.google.cloud.bigtable.data.v2.stub.BigtableBulkReadRowsCallSettings;
+import com.google.cloud.bigtable.data.v2.stub.EnhancedBigtableStubSettings;
 import com.google.cloud.bigtable.data.v2.stub.metrics.NoopMetricsProvider;
 import com.google.cloud.bigtable.hbase.BigtableConfiguration;
 import com.google.cloud.bigtable.hbase.BigtableExtendedConfiguration;
@@ -132,9 +135,13 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
               Optional.of(Duration.ofMinutes(5)),
               Optional.of(Duration.ofMinutes(10)),
               Optional.absent()),
-          /* bulkMutateTimeouts = */ new OperationTimeouts(
+          /* bulkMutateTimeouts= */ new OperationTimeouts(
               Optional.absent(),
               Optional.of(Duration.ofMinutes(1)),
+              Optional.of(Duration.ofMinutes(10))),
+          /* sampleRowKeysTimeouts= */ new OperationTimeouts(
+              Optional.absent(),
+              Optional.of(Duration.ofMinutes(5)),
               Optional.of(Duration.ofMinutes(10))));
   private static final int MAX_CONSECUTIVE_SCAN_ATTEMPTS = 10;
 
@@ -296,9 +303,18 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
       String host = emulatorEndpoint.get().substring(0, split);
       int port = Integer.parseInt(emulatorEndpoint.get().substring(split + 1));
       dataBuilder = BigtableDataSettings.newBuilderForEmulator(host, port);
+      configureConnection(dataBuilder.stubSettings(), BIGTABLE_HOST_KEY, emulatorEndpoint.get());
     } else {
+      String endpoint =
+          BigtableDataSettings.newBuilder()
+              .setProjectId(getProjectId())
+              .setInstanceId(getInstanceId())
+              .build()
+              .getStubSettings()
+              .getEndpoint();
+
       dataBuilder = BigtableDataSettings.newBuilder();
-      configureConnection(dataBuilder.stubSettings(), BIGTABLE_HOST_KEY);
+      configureConnection(dataBuilder.stubSettings(), BIGTABLE_HOST_KEY, endpoint);
       configureCredentialProvider(dataBuilder.stubSettings());
     }
     configureHeaderProvider(dataBuilder.stubSettings());
@@ -339,7 +355,8 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
     configureRetryableCallSettings(
         dataBuilder.stubSettings().readRowSettings(), clientTimeouts.getUnaryTimeouts());
     configureRetryableCallSettings(
-        dataBuilder.stubSettings().sampleRowKeysSettings(), clientTimeouts.getUnaryTimeouts());
+        dataBuilder.stubSettings().sampleRowKeysSettings(),
+        clientTimeouts.getSampleRowKeysTimeouts());
 
     if (!configuration.getBoolean(BIGTABLE_ENABLE_CLIENT_SIDE_METRICS, true)) {
       dataBuilder.setMetricsProvider(NoopMetricsProvider.INSTANCE);
@@ -365,8 +382,15 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
       int port = Integer.parseInt(emulatorEndpoint.substring(split + 1));
       adminBuilder = BigtableTableAdminSettings.newBuilderForEmulator(host, port);
     } else {
+      String defaultEndpoint =
+          BigtableTableAdminSettings.newBuilder()
+              .setProjectId(getProjectId())
+              .setInstanceId(getInstanceId())
+              .build()
+              .getStubSettings()
+              .getEndpoint();
       adminBuilder = BigtableTableAdminSettings.newBuilder();
-      configureConnection(adminBuilder.stubSettings(), BIGTABLE_ADMIN_HOST_KEY);
+      configureConnection(adminBuilder.stubSettings(), BIGTABLE_ADMIN_HOST_KEY, defaultEndpoint);
       configureCredentialProvider(adminBuilder.stubSettings());
     }
     configureHeaderProvider(adminBuilder.stubSettings());
@@ -413,8 +437,14 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
                       })
                   .build());
     } else {
+      String defaultEndpoint =
+          BigtableInstanceAdminSettings.newBuilder()
+              .setProjectId(getProjectId())
+              .build()
+              .getStubSettings()
+              .getEndpoint();
       adminBuilder = BigtableInstanceAdminSettings.newBuilder();
-      configureConnection(adminBuilder.stubSettings(), BIGTABLE_ADMIN_HOST_KEY);
+      configureConnection(adminBuilder.stubSettings(), BIGTABLE_ADMIN_HOST_KEY, defaultEndpoint);
       configureCredentialProvider(adminBuilder.stubSettings());
     }
     configureHeaderProvider(adminBuilder.stubSettings());
@@ -424,14 +454,16 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
     return adminBuilder.build();
   }
 
-  private void configureConnection(StubSettings.Builder<?, ?> stubSettings, String endpointKey) {
-    String defaultEndpoint = stubSettings.getEndpoint();
+  private void configureConnection(
+      StubSettings.Builder<?, ?> stubSettings, String endpointKey, String defaultEndpoint) {
     String defaultHostname = defaultEndpoint.substring(0, defaultEndpoint.lastIndexOf(':'));
     String defaultPort = defaultEndpoint.substring(defaultEndpoint.lastIndexOf(':') + 1);
 
     Optional<String> hostOverride = Optional.fromNullable(configuration.get(endpointKey));
     Optional<String> portOverride = Optional.fromNullable(configuration.get(BIGTABLE_PORT_KEY));
     Optional<String> endpointOverride = Optional.absent();
+    Optional<String> jwtAudienceOverride =
+        Optional.fromNullable(configuration.get(BIGTABLE_JWT_AUDIENCE_KEY));
 
     if (hostOverride.isPresent() || portOverride.isPresent()) {
       endpointOverride =
@@ -447,6 +479,12 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
     if (endpointOverride.isPresent()) {
       stubSettings.setEndpoint(endpointOverride.get());
       LOG.debug("%s is configured at %s", endpointKey, endpointOverride);
+    }
+
+    if (jwtAudienceOverride.isPresent()
+        && stubSettings instanceof EnhancedBigtableStubSettings.Builder) {
+      ((EnhancedBigtableStubSettings.Builder) stubSettings)
+          .setJwtAudience(jwtAudienceOverride.get());
     }
 
     final InstantiatingGrpcChannelProvider.Builder channelProvider =
@@ -473,7 +511,8 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
     if (endpointKey.equals(BIGTABLE_HOST_KEY)) {
       String channelCount = configuration.get(BIGTABLE_DATA_CHANNEL_COUNT_KEY);
       if (!Strings.isNullOrEmpty(channelCount)) {
-        channelProvider.setPoolSize(Integer.parseInt(channelCount));
+        channelProvider.setChannelPoolSettings(
+            ChannelPoolSettings.staticallySized(Integer.parseInt(channelCount)));
       }
     }
 
@@ -484,14 +523,11 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
           channelProvider.getChannelConfigurator();
 
       channelProvider.setChannelConfigurator(
-          new ApiFunction<ManagedChannelBuilder, ManagedChannelBuilder>() {
-            @Override
-            public ManagedChannelBuilder apply(ManagedChannelBuilder channelBuilder) {
-              if (prevConfigurator != null) {
-                channelBuilder = prevConfigurator.apply(channelBuilder);
-              }
-              return channelBuilder.executor(null);
+          channelBuilder -> {
+            if (prevConfigurator != null) {
+              channelBuilder = prevConfigurator.apply(channelBuilder);
             }
+            return channelBuilder.executor(null);
           });
     }
 
@@ -535,7 +571,7 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
       String jsonValue = configuration.get(BIGTABLE_SERVICE_ACCOUNT_JSON_VALUE_KEY);
       stubSettings.setCredentialsProvider(
           FixedCredentialsProvider.create(
-              GoogleCredentials.fromStream(
+              ServiceAccountJwtAccessCredentials.fromStream(
                   new ByteArrayInputStream(jsonValue.getBytes(StandardCharsets.UTF_8)))));
 
     } else if (!Strings.isNullOrEmpty(
@@ -544,7 +580,7 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
           configuration.get(BIGTABLE_SERVICE_ACCOUNT_JSON_KEYFILE_LOCATION_KEY);
       stubSettings.setCredentialsProvider(
           FixedCredentialsProvider.create(
-              GoogleCredentials.fromStream(new FileInputStream(keyFileLocation))));
+              ServiceAccountJwtAccessCredentials.fromStream(new FileInputStream(keyFileLocation))));
 
     } else if (!Strings.isNullOrEmpty(configuration.get(BIGTABLE_SERVICE_ACCOUNT_EMAIL_KEY))) {
       String serviceAccount = configuration.get(BIGTABLE_SERVICE_ACCOUNT_EMAIL_KEY);
@@ -734,6 +770,11 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
           .retrySettings()
           .setTotalTimeout(operationTimeouts.getOperationTimeout().get());
     }
+
+    String idleTimeout = configuration.get(BIGTABLE_TEST_IDLE_TIMEOUT_MS);
+    if (idleTimeout != null) {
+      readRowsSettings.setIdleTimeout(Duration.ofMillis(Long.parseLong(idleTimeout)));
+    }
   }
 
   private void configureRetryableCallSettings(
@@ -839,7 +880,16 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
             extractDuration(BIGTABLE_RPC_TIMEOUT_MS_KEY, MAX_ELAPSED_BACKOFF_MILLIS_KEY)
                 .or(DEFAULT_TIMEOUTS.unaryTimeouts.operationTimeout));
 
-    return new ClientOperationTimeouts(unaryTimeouts, scanTimeouts, bulkMutateTimeouts);
+    OperationTimeouts sampleRowKeysTimeouts =
+        new OperationTimeouts(
+            DEFAULT_TIMEOUTS.sampleRowKeysTimeouts.responseTimeout,
+            extractDuration(BIGTABLE_RPC_ATTEMPT_TIMEOUT_MS_KEY)
+                .or(DEFAULT_TIMEOUTS.sampleRowKeysTimeouts.attemptTimeout),
+            extractDuration(BIGTABLE_RPC_TIMEOUT_MS_KEY, MAX_ELAPSED_BACKOFF_MILLIS_KEY)
+                .or(DEFAULT_TIMEOUTS.sampleRowKeysTimeouts.operationTimeout));
+
+    return new ClientOperationTimeouts(
+        unaryTimeouts, scanTimeouts, bulkMutateTimeouts, sampleRowKeysTimeouts);
   }
 
   private Optional<Duration> extractDuration(String... keys) {
@@ -884,19 +934,25 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
 
     static final ClientOperationTimeouts EMPTY =
         new ClientOperationTimeouts(
-            OperationTimeouts.EMPTY, OperationTimeouts.EMPTY, OperationTimeouts.EMPTY);
+            OperationTimeouts.EMPTY,
+            OperationTimeouts.EMPTY,
+            OperationTimeouts.EMPTY,
+            OperationTimeouts.EMPTY);
 
     private final OperationTimeouts unaryTimeouts;
     private final OperationTimeouts scanTimeouts;
     private final OperationTimeouts bulkMutateTimeouts;
+    private final OperationTimeouts sampleRowKeysTimeouts;
 
     public ClientOperationTimeouts(
         OperationTimeouts unaryTimeouts,
         OperationTimeouts scanTimeouts,
-        OperationTimeouts bulkMutateTimeouts) {
+        OperationTimeouts bulkMutateTimeouts,
+        OperationTimeouts sampleRowKeysTimeouts) {
       this.unaryTimeouts = unaryTimeouts;
       this.scanTimeouts = scanTimeouts;
       this.bulkMutateTimeouts = bulkMutateTimeouts;
+      this.sampleRowKeysTimeouts = sampleRowKeysTimeouts;
     }
 
     public OperationTimeouts getUnaryTimeouts() {
@@ -909,6 +965,10 @@ public class BigtableHBaseVeneerSettings extends BigtableHBaseSettings {
 
     public OperationTimeouts getBulkMutateTimeouts() {
       return bulkMutateTimeouts;
+    }
+
+    public OperationTimeouts getSampleRowKeysTimeouts() {
+      return sampleRowKeysTimeouts;
     }
   }
 

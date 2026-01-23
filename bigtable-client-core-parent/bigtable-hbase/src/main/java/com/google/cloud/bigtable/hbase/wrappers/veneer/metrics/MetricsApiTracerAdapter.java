@@ -17,7 +17,7 @@ package com.google.cloud.bigtable.hbase.wrappers.veneer.metrics;
 
 import com.google.api.core.InternalApi;
 import com.google.api.gax.tracing.ApiTracerFactory.OperationType;
-import com.google.api.gax.tracing.BaseApiTracer;
+import com.google.cloud.bigtable.data.v2.stub.metrics.BigtableTracer;
 import com.google.cloud.bigtable.metrics.BigtableClientMetrics;
 import com.google.cloud.bigtable.metrics.BigtableClientMetrics.MetricLevel;
 import com.google.cloud.bigtable.metrics.Counter;
@@ -35,7 +35,7 @@ import org.threeten.bp.Duration;
  * its lifecycle.
  */
 @InternalApi
-public class MetricsApiTracerAdapter extends BaseApiTracer {
+public class MetricsApiTracerAdapter extends BigtableTracer {
 
   private final Timer firstResponseLatencyTimer =
       BigtableClientMetrics.timer(MetricLevel.Info, "grpc.method.ReadRows.firstResponse.latency");
@@ -52,6 +52,9 @@ public class MetricsApiTracerAdapter extends BaseApiTracer {
 
   private final AtomicBoolean firstResponseRecorded;
   private volatile Context firstResponseTimer;
+
+  private final AtomicBoolean opDone = new AtomicBoolean();
+  private final AtomicBoolean attemptDone = new AtomicBoolean();
 
   public MetricsApiTracerAdapter(
       RpcMetrics rpcMetrics, String methodName, OperationType operationType) {
@@ -73,17 +76,37 @@ public class MetricsApiTracerAdapter extends BaseApiTracer {
   }
 
   @Override
+  public void operationFinishEarly() {
+    if (attemptDone.compareAndSet(false, true)) {
+      activeRpcCounter.dec();
+      rpcTimer.close();
+    }
+    if (opDone.compareAndSet(false, true)) {
+      operationTimer.close();
+    }
+  }
+
+  @Override
   public void operationSucceeded() {
+    if (!opDone.compareAndSet(false, true)) {
+      return;
+    }
     operationTimer.close();
   }
 
   @Override
   public void operationCancelled() {
+    if (!opDone.compareAndSet(false, true)) {
+      return;
+    }
     operationTimer.close();
   }
 
   @Override
   public void operationFailed(Throwable error) {
+    if (!opDone.compareAndSet(false, true)) {
+      return;
+    }
     if (lastRetryStatus == RetryStatus.RETRIES_EXHAUSTED) {
       rpcMetrics.markRetriesExhasted();
     } else {
@@ -97,6 +120,8 @@ public class MetricsApiTracerAdapter extends BaseApiTracer {
 
   @Override
   public void attemptStarted(int attemptNumber) {
+    attemptDone.set(false);
+
     lastRetryStatus = RetryStatus.PERMANENT_FAILURE;
     rpcTimer = rpcMetrics.timeRpc();
     activeRpcCounter.inc();
@@ -105,40 +130,45 @@ public class MetricsApiTracerAdapter extends BaseApiTracer {
 
   @Override
   public void attemptSucceeded() {
+    if (!attemptDone.compareAndSet(false, true)) {
+      return;
+    }
     rpcTimer.close();
     activeRpcCounter.dec();
   }
 
   @Override
   public void attemptCancelled() {
+    if (!attemptDone.compareAndSet(false, true)) {
+      return;
+    }
     rpcTimer.close();
     activeRpcCounter.dec();
   }
 
   @Override
   public void attemptFailed(Throwable error, Duration delay) {
+    if (!attemptDone.compareAndSet(false, true)) {
+      return;
+    }
+
     rpcTimer.close();
     lastRetryStatus = RetryStatus.ATTEMPT_RETRYABLE_FAILURE;
     rpcMetrics.markRetry();
     activeRpcCounter.dec();
 
-    Status.Code statusCode;
-    // Handle partial MutateRows failures
-    // the attempt will be marked as failed despite an OK status
-    // This is because an OK response can include failed entries that need to be retried
-    if (error == null) {
-      statusCode = Status.OK.getCode();
-    } else {
-      statusCode = Status.fromThrowable(error).getCode();
-    }
+    // For batching, retries can be invoked despite the rpc status being OK because an entry failed.
+    Status status = (error == null) ? Status.OK : Status.fromThrowable(error);
 
-    BigtableClientMetrics.meter(
-            MetricLevel.Info, "grpc.errors." + statusCode)
-        .mark();
+    BigtableClientMetrics.meter(MetricLevel.Info, "grpc.errors." + status.getCode()).mark();
   }
 
   @Override
   public void attemptFailedRetriesExhausted(Throwable error) {
+    if (!attemptDone.compareAndSet(false, true)) {
+      return;
+    }
+
     rpcTimer.close();
     activeRpcCounter.dec();
     lastRetryStatus = RetryStatus.RETRIES_EXHAUSTED;
@@ -146,19 +176,12 @@ public class MetricsApiTracerAdapter extends BaseApiTracer {
 
   @Override
   public void attemptPermanentFailure(Throwable error) {
+    if (!attemptDone.compareAndSet(false, true)) {
+      return;
+    }
     rpcTimer.close();
     activeRpcCounter.dec();
     lastRetryStatus = RetryStatus.PERMANENT_FAILURE;
-  }
-
-  @Override
-  public void lroStartFailed(Throwable error) {
-    // noop
-  }
-
-  @Override
-  public void lroStartSucceeded() {
-    // noop
   }
 
   @Override

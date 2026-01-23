@@ -14,19 +14,18 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 -->
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
     <groupId>com.google.cloud.bigtable</groupId>
     <artifactId>bigtable-hbase-mirroring-client-core-parent</artifactId>
-    <version>0.7.1</version> <!-- {x-version-update:bigtable-hbase-mirroring:current} -->
+    <version>0.10.6</version> <!-- {x-version-update:bigtable-hbase-mirroring:current} -->
   </parent>
 
   <artifactId>bigtable-hbase-mirroring-client-core</artifactId>
   <packaging>jar</packaging>
-  <version>0.7.1</version> <!-- {x-version-update:bigtable-hbase-mirroring:current} -->
+  <version>0.10.6</version> <!-- {x-version-update:bigtable-hbase-mirroring:current} -->
 
   <name>${project.groupId}:${project.artifactId}</name>
   <description>
@@ -41,16 +40,12 @@ limitations under the License.
   </properties>
 
   <dependencies>
-    <!-- external deps -->
+    <!-- Environment deps first -->
     <dependency>
       <groupId>org.apache.hbase</groupId>
       <artifactId>hbase-shaded-client</artifactId>
       <version>${hbase1.version}</version>
       <exclusions>
-        <exclusion>
-          <groupId>org.slf4j</groupId>
-          <artifactId>slf4j-log4j12</artifactId>
-        </exclusion>
         <exclusion>
           <groupId>log4j</groupId>
           <artifactId>log4j</artifactId>
@@ -63,6 +58,26 @@ limitations under the License.
       <version>${reload4j.version}</version>
       <scope>runtime</scope>
     </dependency>
+
+    <!-- Project deps -->
+    <dependency>
+      <groupId>com.google.cloud.bigtable</groupId>
+      <artifactId>protobuf-java-format-shaded</artifactId>
+      <version>0.10.6</version> <!-- {x-version-update:bigtable-hbase-mirroring:current} -->
+      <scope>compile</scope>
+
+      <exclusions>
+        <!-- Workaround MNG-5899 & MSHADE-206. Maven >= 3.3.0 doesn't use the dependency reduced
+        pom.xml files when invoking the build from a parent project. So we have to manually exclude
+        the dependencies. -->
+        <exclusion>
+          <groupId>com.googlecode.protobuf-java-format</groupId>
+          <artifactId>protobuf-java-format</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+
+    <!-- impl deps -->
     <dependency>
       <groupId>com.google.api</groupId>
       <artifactId>api-common</artifactId>
@@ -73,12 +88,6 @@ limitations under the License.
       <groupId>com.google.guava</groupId>
       <artifactId>guava</artifactId>
       <version>${guava.version}</version>
-      <scope>compile</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.checkerframework</groupId>
-      <artifactId>checker-compat-qual</artifactId>
-      <version>2.5.5</version>
     </dependency>
 
     <!-- deps to be shaded -->
@@ -86,14 +95,8 @@ limitations under the License.
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
       <version>2.14.2</version>
-      <scope>compile</scope>
     </dependency>
-    <dependency>
-      <groupId>com.google.cloud.bigtable</groupId>
-      <artifactId>protobuf-java-format-shaded</artifactId>
-      <version>0.7.1</version> <!-- {x-version-update:bigtable-hbase-mirroring:current} -->
-      <scope>compile</scope>
-    </dependency>
+
     <dependency>
       <groupId>io.opencensus</groupId>
       <artifactId>opencensus-api</artifactId>
@@ -111,7 +114,7 @@ limitations under the License.
     <dependency>
       <groupId>com.google.truth</groupId>
       <artifactId>truth</artifactId>
-      <version>1.1.3</version>
+      <version>${truth.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -121,4 +124,34 @@ limitations under the License.
       <scope>test</scope>
     </dependency>
   </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>com.google.cloud.bigtable.test</groupId>
+        <artifactId>bigtable-build-helper</artifactId>
+        <version>2.15.6</version> <!-- {x-version-update:bigtable-client-parent:current} -->
+
+        <executions>
+          <execution>
+            <id>verify-mirror-deps-hbase</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>verify-mirror-deps</goal>
+            </goals>
+            <configuration>
+              <targetDependencies>
+                <!-- make sure that we are a strict superset of hbase -->
+                <targetDependency>org.apache.hbase:hbase-shaded-client</targetDependency>
+              </targetDependencies>
+              <ignoredDependencies>
+                <!-- forcefully replaced with reload4j -->
+                <dependency>log4j:log4j</dependency>
+              </ignoredDependencies>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
 </project>

@@ -18,11 +18,12 @@ limitations under the License.
   <parent>
     <artifactId>bigtable-hbase-2.x-parent</artifactId>
     <groupId>com.google.cloud.bigtable</groupId>
-    <version>2.12.1</version> <!-- {x-version-update:bigtable-client-parent:current} -->
+    <version>2.15.6</version> <!-- {x-version-update:bigtable-client-parent:current} -->
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
   <artifactId>bigtable-hbase-2.x-hadoop</artifactId>
+  <name>${project.groupId}:${project.artifactId}</name>
   <description>
     Bigtable connector compatible with HBase 2.x. It most of its dependencies
     (hbase &amp; grpc). Its mainly intended to be used by dataflow 2.x to avoid
@@ -30,24 +31,16 @@ limitations under the License.
     bigtable-hbase-2.x.
   </description>
 
-  <properties>
-    <!-- define a property that can be ignored by renovate -->
-    <hbase2-hadoop-slf4j.version>1.7.30</hbase2-hadoop-slf4j.version>
-  </properties>
-
   <dependencies>
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>bigtable-hbase-2.x-shaded</artifactId>
-      <version>2.12.1</version> <!-- {x-version-update:bigtable-client-parent:current} -->
+      <version>2.15.6</version> <!-- {x-version-update:bigtable-client-parent:current} -->
       <exclusions>
+        <!-- hbase-shaded-client will be replaced with hbase-client -->
         <exclusion>
           <groupId>org.apache.hbase</groupId>
           <artifactId>hbase-shaded-client</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>com.google.code.findbugs</groupId>
-          <artifactId>jsr305</artifactId>
         </exclusion>
 
         <!-- Workaround MNG-5899 & MSHADE-206. Maven >= 3.3.0 doesn't use the dependency reduced
@@ -59,8 +52,8 @@ limitations under the License.
           <artifactId>bigtable-hbase-2.x</artifactId>
         </exclusion>
         <exclusion>
-          <groupId>com.google.cloud.bigtable</groupId>
-          <artifactId>bigtable-metrics-api</artifactId>
+          <groupId>com.google.cloud</groupId>
+          <artifactId>google-cloud-bigtable</artifactId>
         </exclusion>
         <exclusion>
           <groupId>io.opencensus</groupId>
@@ -72,45 +65,11 @@ limitations under the License.
         </exclusion>
       </exclusions>
     </dependency>
+
     <dependency>
       <groupId>org.apache.hbase</groupId>
       <artifactId>hbase-client</artifactId>
       <version>${hbase2.version}</version>
-    </dependency>
-
-    <!-- Manually promote dependencies: This is necessary to avoid flattening hbase-shaded-client's dependency tree -->
-    <dependency>
-      <groupId>commons-logging</groupId>
-      <artifactId>commons-logging</artifactId>
-      <version>${commons-logging.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>io.dropwizard.metrics</groupId>
-      <artifactId>metrics-core</artifactId>
-      <version>${hbase2-metrics.version}</version>
-      <exclusions>
-        <!-- see slf4j notes below -->
-        <exclusion>
-          <groupId>org.slf4j</groupId>
-          <artifactId>slf4j-api</artifactId>
-        </exclusion>
-      </exclusions>
-    </dependency>
-
-    <!-- unlike hbase-shaded-client, hbase-client depends on slf4j 1.6.1.
-      Which is older than the version requested by metrics-core. However,
-      metrics-core will work fine with the older version and we want to stay
-      compatible with hbase-client deps -->
-    <dependency>
-      <groupId>org.slf4j</groupId>
-      <artifactId>slf4j-api</artifactId>
-      <version>${hbase2-hadoop-slf4j.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.conscrypt</groupId>
-      <artifactId>conscrypt-openjdk-uber</artifactId>
-      <version>${grpc-conscrypt.version}</version>
-      <scope>runtime</scope>
     </dependency>
 
     <!-- Test deps -->
@@ -123,61 +82,34 @@ limitations under the License.
   </dependencies>
 
   <build>
+    <pluginManagement>
+      <plugins>
+        <!-- The only dep that has changed in this module is hbase-shaded-client to hbase-client. hbase-client
+        does not adhere to our enforcement rules and we dont have any way to influence it. So just disable enforcement.
+        TODO: remove this once hbase deps become provided
+        -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-enforcer-plugin</artifactId>
+          <executions>
+            <execution>
+              <id>enforce</id>
+              <configuration>
+                <skip>true</skip>
+              </configuration>
+            </execution>
+            <execution>
+              <id>enforce-banned-deps</id>
+              <configuration>
+                <skip>true</skip>
+              </configuration>
+            </execution>
+          </executions>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+
     <plugins>
-      <plugin>
-        <!-- disable google-cloud-shared-config enforcement checks because
-        hbase-client's dependency subtree doesn't follow the same rules and is
-        unable to be fixed here -->
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-enforcer-plugin</artifactId>
-        <executions>
-          <execution>
-            <id>enforce</id>
-            <configuration>
-              <skip>true</skip>
-            </configuration>
-          </execution>
-          <!-- hbase-client doesnt align slf4j-api & slf4j-log4j -->
-          <execution>
-            <id>enforce-version-consistency-slf4j</id>
-            <configuration>
-              <skip>true</skip>
-            </configuration>
-          </execution>
-          <!-- This must be a drop in replacement for hbase-client, so can't
-            manage hbase's deps -->
-          <execution>
-            <id>enforce-banned-deps</id>
-            <goals>
-              <goal>enforce</goal>
-            </goals>
-            <configuration>
-              <skip>true</skip>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>license-maven-plugin</artifactId>
-        <version>2.0.0</version>
-        <executions>
-          <execution>
-            <id>default-cli</id>
-            <phase>generate-resources</phase>
-            <goals>
-              <goal>add-third-party</goal>
-<!--              <goal>download-licenses</goal>-->
-            </goals>
-            <configuration>
-              <excludedScopes>test,provided,system</excludedScopes>
-              <!--Should match the artifactset for shade plugin-->
-              <includedArtifacts>com.google.cloud.bigtable:bigtable-hbase-2.x-shaded</includedArtifacts>
-              <generateBundle>true</generateBundle>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-shade-plugin</artifactId>
@@ -191,14 +123,10 @@ limitations under the License.
               <shadedArtifactAttached>false</shadedArtifactAttached>
               <createDependencyReducedPom>true</createDependencyReducedPom>
               <!-- Need to manually promote to dependencies to keep the structure of hbase-shade-client -->
-              <promoteTransitiveDependencies>
-                false
-              </promoteTransitiveDependencies>
+              <promoteTransitiveDependencies>false</promoteTransitiveDependencies>
               <transformers>
-                <transformer
-                    implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer"/>
-                <transformer
-                    implementation="org.apache.maven.plugins.shade.resource.ApacheNoticeResourceTransformer"/>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer" />
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheNoticeResourceTransformer" />
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer" />
               </transformers>
               <filters>
@@ -213,20 +141,9 @@ limitations under the License.
               </filters>
               <artifactSet>
                 <includes>
-                  <include>
-                    com.google.cloud.bigtable:bigtable-hbase-2.x-shaded
-                  </include>
+                  <include>com.google.cloud.bigtable:bigtable-hbase-2.x-shaded</include>
                 </includes>
               </artifactSet>
-              <relocations>
-                <!-- Undo the relocation that hbase-shaded-client did to make it compatible with the regular hbase-client -->
-                <relocation>
-                  <pattern>
-                    org.apache.hadoop.hbase.shaded.com.google.protobuf
-                  </pattern>
-                  <shadedPattern>com.google.protobuf</shadedPattern>
-                </relocation>
-              </relocations>
             </configuration>
           </execution>
         </executions>
@@ -235,7 +152,7 @@ limitations under the License.
       <plugin>
         <groupId>com.google.cloud.bigtable.test</groupId>
         <artifactId>bigtable-build-helper</artifactId>
-        <version>2.12.1</version> <!-- {x-version-update:bigtable-client-parent:current} -->
+        <version>2.15.6</version> <!-- {x-version-update:bigtable-client-parent:current} -->
 
         <executions>
           <execution>
@@ -266,43 +183,21 @@ limitations under the License.
             </goals>
           </execution>
           <execution>
-            <id>verify-mirror-deps</id>
+            <id>verify-mirror-deps-hbase</id>
             <phase>verify</phase>
             <goals>
               <goal>verify-mirror-deps</goal>
             </goals>
             <configuration>
               <targetDependencies>
-                <targetDependency>org.apache.hbase:hbase-client:${hbase2.version}</targetDependency>
+                <targetDependency>org.apache.hbase:hbase-client</targetDependency>
               </targetDependencies>
               <ignoredDependencies>
-                <!-- There are 3 users of this dep: us, httpclient & hbase2.
-                httpclient requires a higher version than hbase, so for now,
-                we are using that version -->
-                <ignoredDependency>commons-logging:commons-logging</ignoredDependency>
+                <dependency>log4j:log4j</dependency>
               </ignoredDependencies>
             </configuration>
           </execution>
         </executions>
-      </plugin>
-
-      <!-- skip for shaded jar-->
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-dependency-plugin</artifactId>
-        <configuration>
-          <ignoredDependencies>
-              <dependency>*</dependency>
-          </ignoredDependencies>
-        </configuration>
-      </plugin>
-      <!-- skip for shaded jar-->
-      <plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>clirr-maven-plugin</artifactId>
-        <configuration>
-          <skip>true</skip>
-        </configuration>
       </plugin>
     </plugins>
   </build>

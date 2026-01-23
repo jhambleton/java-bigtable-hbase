@@ -17,6 +17,8 @@ package com.google.cloud.bigtable.beam.hbasesnapshots;
 
 import com.google.api.services.storage.model.StorageObject;
 import com.google.cloud.bigtable.beam.hbasesnapshots.conf.SnapshotConfig;
+import com.google.common.base.Joiner;
+import com.google.common.io.ByteStreams;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.channels.Channels;
@@ -30,8 +32,6 @@ import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.util.MimeTypes;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.ByteStreams;
 
 /** Contains various helper methods to handle different tasks while executing tests. */
 public class SnapshotTestHelper {
